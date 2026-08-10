@@ -73,6 +73,9 @@ interface PiSdkModule {
 	ModelRuntime: {
 		create(options?: Record<string, unknown>): Promise<ModelRuntimeLike>;
 	};
+	SettingsManager: {
+		create(cwd?: string, agentDir?: string): SettingsManagerLike;
+	};
 	resolveModelScopeWithDiagnostics(
 		patterns: string[],
 		modelRuntime: ModelRuntimeLike,
@@ -91,6 +94,12 @@ interface ModelLike {
 interface ModelRuntimeLike {
 	getAvailable?: () => ModelLike[];
 	getModels?: () => ModelLike[];
+	getModel?: (provider: string, modelId: string) => ModelLike | undefined;
+}
+
+interface SettingsManagerLike {
+	getDefaultProvider?: () => string | undefined;
+	getDefaultModel?: () => string | undefined;
 }
 
 interface ResolveModelScopeResultLike {
@@ -464,19 +473,30 @@ export async function runInlineModel(
 			modelsPath: join(piSdk.getAgentDir(), "models.json"),
 			refreshOnCreate: false,
 		});
+		const settingsManager = piSdk.SettingsManager.create(
+			cwd,
+			piSdk.getAgentDir(),
+		);
 		const sessionManager = piSdk.SessionManager.inMemory(cwd);
 		const resourceLoader = createChildResourceLoader(piSdk, options, cwd);
 		await resourceLoader.reload();
 		const requestedModel = options.model ?? options.agentDefinition?.model;
 		const requestedThinking =
 			options.thinking ?? options.agentDefinition?.thinking;
+		const configuredModel =
+			requestedModel ?? settingsManager.getDefaultModel?.();
+		const configuredProvider = settingsManager.getDefaultProvider?.();
 		let model: ModelLike | undefined;
 		let modelThinking: ThinkingLevel | undefined;
-		if (requestedModel !== undefined) {
+		if (configuredModel !== undefined) {
+			const modelReference =
+				configuredModel.includes("/") || configuredProvider === undefined
+					? configuredModel
+					: `${configuredProvider}/${configuredModel}`;
 			const resolved = await resolveRequestedModel(
 				modelRuntime,
 				piSdk.resolveModelScopeWithDiagnostics,
-				requestedModel,
+				modelReference,
 			);
 			model = resolved.model;
 			modelThinking = resolved.thinkingLevel;
@@ -491,6 +511,7 @@ export async function runInlineModel(
 			excludeTools: ["subagent"],
 			...(tools === undefined ? {} : { tools }),
 			...(model === undefined ? {} : { model }),
+			settingsManager,
 			...(requestedThinking === undefined && modelThinking === undefined
 				? {}
 				: { thinkingLevel: requestedThinking ?? modelThinking }),

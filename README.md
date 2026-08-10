@@ -162,6 +162,14 @@ Open the run monitor:
 
 ![/subagent panel](./assets/subagent-panel.png)
 
+### Live progress
+
+While a subagent runs, the tool row in the transcript shows live progress (elapsed time and the last output line, refreshed every second) instead of staying static until completion. Works for sync, async, headless, and herdr runs.
+
+### Watch a run
+
+`Ctrl+1` … `Ctrl+9` (and `Ctrl+Alt+1` … `Ctrl+Alt+9` as a fallback) open a modal overlay with the live progress of the 1st … 9th most recent subagent run of the current session: status, elapsed time, last activity, task text, and a live tail of the run's output. `↑`/`↓`/`j`/`k` scroll, `q`/`esc` close. Shortcuts fire only while the input editor is focused.
+
 ## Code API
 
 Orchestrators can use the same runtime directly:

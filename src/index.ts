@@ -24,7 +24,7 @@ import {
 	type ResolvedBackend,
 } from "./core/constants.ts";
 import { resolveBackend } from "./core/resolver.ts";
-import { clip } from "./core/text-width.ts";
+import { clip, visibleLength } from "./core/text-width.ts";
 import { validateResolveInput } from "./core/validation.ts";
 import {
 	startAsyncParallelSubagentRuns,
@@ -40,6 +40,14 @@ import {
 } from "./orchestrate/run.ts";
 import { getRunLogs, getRunStatus, waitForRun } from "./orchestrate/status.ts";
 import { showSubagentPanel } from "./panel.ts";
+import {
+	attachProgress,
+	formatProgress,
+	getProgress,
+	resetProgress,
+	type LiveProgress,
+} from "./live-progress.ts";
+import { registerSubagentWatchShortcuts } from "./watch.ts";
 import { WorkspacePolicyError } from "./workspace/worktree.ts";
 
 const TOOL_NAME = "subagent";
@@ -159,6 +167,34 @@ class SingleLineComponent {
 
 	render(width: number): string[] {
 		return [clip(this.text, width)];
+	}
+}
+
+/**
+ * Tool-panel row for the subagent tool. Shows the static call summary plus a
+ * live progress suffix (elapsed time, last activity, last output line) that
+ * updates while the run is in flight via the progress tracker.
+ */
+class ProgressLineComponent {
+	constructor(
+		private readonly base: string,
+		private readonly getProgress: () => LiveProgress | undefined,
+	) {}
+
+	invalidate(): void {
+		// Progress is pulled on every render from the live-progress tracker.
+	}
+
+	render(width: number): string[] {
+		const progress = this.getProgress();
+		if (progress === undefined) return [clip(this.base, width)];
+		const suffix = formatProgress(progress);
+		const separator = " · ";
+		const baseWidth = Math.max(
+			4,
+			width - visibleLength(suffix) - visibleLength(separator),
+		);
+		return [clip(`${clip(this.base, baseWidth)}${separator}${suffix}`, width)];
 	}
 }
 
@@ -765,6 +801,12 @@ function notifyCompletion(
 }
 
 export default function registerSubagentEngine(pi: ExtensionAPI) {
+	registerSubagentWatchShortcuts(pi);
+	if (typeof pi.on === "function") {
+		pi.on("session_shutdown", () => {
+			resetProgress();
+		});
+	}
 	if (typeof pi.registerCommand === "function") {
 		pi.registerCommand("subagent", {
 			description:
@@ -974,13 +1016,22 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 			escalateAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			killAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		}),
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
 			const title = theme.fg("toolTitle", theme.bold("subagent"));
 			const summary = subagentCallSummary(args);
 			const rest = summary.startsWith("subagent ")
 				? summary.slice("subagent ".length)
 				: summary;
-			return new SingleLineComponent(`${title} ${theme.fg("muted", rest)}`);
+			const base = `${title} ${theme.fg("muted", rest)}`;
+			if (context?.toolCallId && typeof context.invalidate === "function") {
+				attachProgress(context.toolCallId, context.cwd, () =>
+					context.invalidate(),
+				);
+				return new ProgressLineComponent(base, () =>
+					getProgress(context.toolCallId),
+				);
+			}
+			return new SingleLineComponent(base);
 		},
 		async execute(...executeArgs: unknown[]) {
 			const { params, signal, onUpdate, ctx } =

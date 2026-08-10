@@ -455,6 +455,39 @@ Stale or malformed locators are counted in the header and skipped. Active runs w
 
 The panel is for human inspection; existing-run tool actions remain the programmatic interface.
 
+## Live progress
+
+While a subagent tool call is executing (or after an async run has been launched), the TUI tool row shows live progress instead of staying static:
+
+```text
+subagent run · single · worker · Run `go test …` · async · 1m23s · live · ok (10.202s)
+```
+
+The progress suffix is polled from the run artifacts (`.pi/agent/runs/<run>/attempts/<attempt>/`) once per second and includes:
+
+- elapsed time (`9s`, `1m23s`)
+- the last meaningful line of the run's output (parsed from `pi-events.jsonl` for herdr runs, `output.log` otherwise)
+- the terminal outcome once the run finishes (`done in …`, `failed after …`)
+
+Only runs in the tool call's working directory are considered, matched by start-time recency; when several subagent calls run concurrently each call is matched to the next unmatched run in start order.
+
+## Watching a run (keyboard shortcuts)
+
+Each subagent run in the current session can be watched in a modal overlay:
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+1` … `Ctrl+9` | Open live progress of the 1st … 9th most recent run |
+| `Ctrl+Alt+1` … `Ctrl+Alt+9` | Same (fallback for terminals without Ctrl+digit reporting) |
+
+`Ctrl+1` is the most recently updated run, `Ctrl+2` the second-most-recent, and so on. The modal shows status, elapsed time, last activity, the task text, and a live tail of the run's output. `↑`/`↓`/`j`/`k` scroll the output; `q`/`esc` close it. The modal refreshes once per second while open.
+
+> **Terminal support**: `Ctrl+<digit>` needs a terminal that reports modifier keys (Kitty keyboard protocol; Windows Terminal and modern kitty/WezTerm do). In other terminals use the `Ctrl+Alt+<digit>` variants. If a shortcut is not reported by the terminal it is simply not fired.
+
+The shortcuts are extension-registered and only fire while the input editor is focused, so they never interfere with the chat transcript or panel scrolling.
+
+`/subagent panel` remains the full-screen, filterable view; the shortcuts target a single run quickly without leaving the input.
+
 ## Development validation
 
 In this source checkout:

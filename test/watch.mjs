@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { interopDefault: false });
-const watch = await jiti.import("./src/watch.ts");
+const watch = await jiti.import("../src/watch.ts");
 
 const results = [];
 function check(name, cond, extra = "") {

@@ -1,12 +1,19 @@
+import { spawnSync } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
 	appendRunEvent,
 	readRunRecord,
 	recordInterruptRequest,
 	type RunAttemptRecord,
 	type RunRecord,
+	type RunRef,
 } from "../artifacts/index.ts";
 import { resolveRunRef } from "./run-ref.ts";
 import { isTerminalStatus } from "./status.ts";
+
+/** Relative default root for durable run artifacts. */
+const INTERRUPT_RUNS_DIR = ".pi/agent/runs";
 
 export interface InterruptRunOptions {
 	cwd?: string;
@@ -44,11 +51,30 @@ function sendProcessSignal(
 ): boolean {
 	const pid = attempt.process?.pid;
 	if (pid === undefined) return false;
+	if (process.platform === "win32") {
+		// Windows: a detached durable worker has no console attached, so
+		// SIGINT/SIGTERM cannot be delivered gracefully (they arrive only as an
+		// unclean kill and the worker's cancel handler never runs). Graceful
+		// interrupts are therefore handled cooperatively through the
+		// interrupt-request marker file (see writeInterruptRequestMarker and the
+		// durable worker's polling); only SIGKILL is sent here, as a hard kill
+		// of the whole process tree.
+		if (signal !== "SIGKILL") return false;
+		const kill = spawnSync(
+			"taskkill",
+			["/PID", String(pid), "/T", "/F"],
+			{ windowsHide: true, stdio: "ignore" },
+		);
+		if (kill.status === 0) return true;
+		try {
+			process.kill(pid, "SIGKILL");
+			return true;
+		} catch {
+			return false;
+		}
+	}
 	try {
-		const target =
-			process.platform === "win32"
-				? pid
-				: -(attempt.process?.processGroupId ?? pid);
+		const target = -(attempt.process?.processGroupId ?? pid);
 		process.kill(target, signal);
 		return true;
 	} catch {
@@ -58,6 +84,42 @@ function sendProcessSignal(
 		} catch {
 			return false;
 		}
+	}
+}
+
+/**
+ * Write a cooperative cancel marker into the attempt directory so a durable
+ * worker that cannot receive OS signals (Windows detached processes) can
+ * observe the interrupt request and cancel itself gracefully.
+ */
+async function writeInterruptRequestMarker(
+	ref: RunRef,
+	attempt: RunAttemptRecord,
+	signal: NodeJS.Signals,
+	reason: string | null,
+): Promise<void> {
+	try {
+		const cwd = ref.cwd ?? process.cwd();
+		const runsDir = ref.runsDir ?? INTERRUPT_RUNS_DIR;
+		const markerPath = join(
+			cwd,
+			runsDir,
+			ref.runId,
+			"attempts",
+			attempt.attemptId,
+			"interrupt-request.json",
+		);
+		await writeFile(
+			markerPath,
+			JSON.stringify({
+				signal,
+				reason,
+				requestedAt: new Date().toISOString(),
+			}),
+			"utf8",
+		);
+	} catch {
+		// Best-effort: on POSIX the OS signal is the primary mechanism.
 	}
 }
 
@@ -82,8 +144,18 @@ async function escalate(
 	for (const attempt of runningAttempts(
 		record,
 		options.attemptId ?? options.taskId,
-	))
+	)) {
+		if (process.platform === "win32" && signal !== "SIGKILL") {
+			await writeInterruptRequestMarker(
+				ref,
+				attempt,
+				signal,
+				options.reason ?? null,
+			);
+			continue;
+		}
 		sendProcessSignal(attempt, signal);
+	}
 	await appendRunEvent(ref, {
 		type: "run.interrupt_requested",
 		status: record.status,
@@ -132,6 +204,16 @@ export async function interruptRun(
 	const interruptedAttempts: string[] = [];
 	const unsupportedAttempts: string[] = [];
 	for (const attempt of candidates) {
+		if (process.platform === "win32" && signal !== "SIGKILL") {
+			await writeInterruptRequestMarker(
+				ref,
+				attempt,
+				signal,
+				options.reason ?? null,
+			);
+			interruptedAttempts.push(attempt.attemptId);
+			continue;
+		}
 		if (sendProcessSignal(attempt, signal))
 			interruptedAttempts.push(attempt.attemptId);
 		else unsupportedAttempts.push(attempt.attemptId);

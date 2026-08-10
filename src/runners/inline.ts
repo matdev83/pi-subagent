@@ -65,16 +65,22 @@ interface DefaultResourceLoaderOptionsLike {
 }
 
 interface PiSdkModule {
-	AuthStorage: { create(): unknown };
-	ModelRegistry: { create(authStorage: unknown): ModelRegistryLike };
 	SessionManager: { inMemory(cwd?: string): unknown };
 	DefaultResourceLoader: new (
 		options: DefaultResourceLoaderOptionsLike,
 	) => ResourceLoaderLike;
 	getAgentDir: () => string;
+	ModelRuntime: {
+		create(options?: Record<string, unknown>): Promise<ModelRuntimeLike>;
+	};
+	resolveModelScopeWithDiagnostics(
+		patterns: string[],
+		modelRuntime: ModelRuntimeLike,
+		options?: Record<string, unknown>,
+	): Promise<ResolveModelScopeResultLike>;
 	createAgentSession(
 		options: Record<string, unknown>,
-	): Promise<{ session: AgentSessionLike; diagnostics?: unknown[] }>;
+	): Promise<{ session: AgentSessionLike }>;
 }
 
 interface ModelLike {
@@ -82,11 +88,17 @@ interface ModelLike {
 	id?: string;
 }
 
-interface ModelRegistryLike {
-	reload?: () => Promise<void>;
+interface ModelRuntimeLike {
 	getAvailable?: () => ModelLike[];
 	getModels?: () => ModelLike[];
-	find?: (provider: string, modelId: string) => ModelLike | undefined;
+}
+
+interface ResolveModelScopeResultLike {
+	scopedModels: Array<{
+		model: ModelLike;
+		thinkingLevel?: ThinkingLevel;
+	}>;
+	diagnostics?: Array<{ message?: string }>;
 }
 
 interface AgentSessionLike {
@@ -298,35 +310,23 @@ function splitThinkingSuffix(modelReference: string): {
 }
 
 async function resolveRequestedModel(
-	modelRegistry: ModelRegistryLike,
+	modelRuntime: ModelRuntimeLike,
+	resolveModelScope: PiSdkModule["resolveModelScopeWithDiagnostics"],
 	modelReference: string,
-): Promise<ModelLike> {
-	await modelRegistry.reload?.();
-	const parsed = splitThinkingSuffix(modelReference);
-	const reference = parsed.model;
-	const slashIndex = reference.indexOf("/");
-	if (slashIndex > 0) {
-		const provider = reference.slice(0, slashIndex);
-		const modelId = reference.slice(slashIndex + 1);
-		const exact = modelRegistry.find?.(provider, modelId);
-		if (exact !== undefined) return exact;
-	}
-
-	const available =
-		modelRegistry.getAvailable?.() ?? modelRegistry.getModels?.() ?? [];
-	const matches = available.filter((model) => {
-		const provider = typeof model.provider === "string" ? model.provider : "";
-		const id = typeof model.id === "string" ? model.id : "";
-		return `${provider}/${id}` === reference || id === reference;
-	});
-	if (matches.length === 1) return matches[0];
-	if (matches.length > 1)
+): Promise<{ model: ModelLike; thinkingLevel: ThinkingLevel | undefined }> {
+	const result = await resolveModelScope([modelReference], modelRuntime);
+	const scoped = result.scopedModels[0];
+	if (scoped === undefined) {
+		const diagnostic = result.diagnostics?.[0];
+		const detail = diagnostic?.message ?? "";
 		throw new Error(
-			`model ${JSON.stringify(modelReference)} is ambiguous; use provider/model id.`,
+			`model ${JSON.stringify(modelReference)} was not found or is not available. ${detail}`.trim(),
 		);
-	throw new Error(
-		`model ${JSON.stringify(modelReference)} was not found or is not available.`,
-	);
+	}
+	return {
+		model: scoped.model,
+		thinkingLevel: scoped.thinkingLevel,
+	};
 }
 
 function buildPrompt(options: RunInlineModelOptions): string {
@@ -459,28 +459,33 @@ export async function runInlineModel(
 
 	try {
 		const { module: piSdk, source } = await importPiSdk();
-		const authStorage = piSdk.AuthStorage.create();
-		const modelRegistry = piSdk.ModelRegistry.create(authStorage);
+		const modelRuntime = await piSdk.ModelRuntime.create({
+			authPath: join(piSdk.getAgentDir(), "auth.json"),
+			modelsPath: join(piSdk.getAgentDir(), "models.json"),
+			refreshOnCreate: false,
+		});
 		const sessionManager = piSdk.SessionManager.inMemory(cwd);
 		const resourceLoader = createChildResourceLoader(piSdk, options, cwd);
 		await resourceLoader.reload();
 		const requestedModel = options.model ?? options.agentDefinition?.model;
 		const requestedThinking =
 			options.thinking ?? options.agentDefinition?.thinking;
-		const model =
-			requestedModel === undefined
-				? undefined
-				: await resolveRequestedModel(modelRegistry, requestedModel);
-		const modelThinking =
-			requestedModel === undefined
-				? undefined
-				: splitThinkingSuffix(requestedModel).thinking;
+		let model: ModelLike | undefined;
+		let modelThinking: ThinkingLevel | undefined;
+		if (requestedModel !== undefined) {
+			const resolved = await resolveRequestedModel(
+				modelRuntime,
+				piSdk.resolveModelScopeWithDiagnostics,
+				requestedModel,
+			);
+			model = resolved.model;
+			modelThinking = resolved.thinkingLevel;
+		}
 		const tools = options.tools ?? options.agentDefinition?.tools;
 
-		const { session, diagnostics = [] } = await piSdk.createAgentSession({
+		const { session } = await piSdk.createAgentSession({
 			cwd,
-			authStorage,
-			modelRegistry,
+			modelRuntime,
 			sessionManager,
 			resourceLoader,
 			excludeTools: ["subagent"],
@@ -514,8 +519,8 @@ export async function runInlineModel(
 			session.dispose?.();
 		}
 
-		if (diagnostics.length > 0)
-			stderrText += `${JSON.stringify({ sdkSource: source, diagnostics })}\n`;
+		if (source !== undefined)
+			stderrText += `${JSON.stringify({ sdkSource: source })}\n`;
 	} catch (error) {
 		failureKind = failureKind ?? "model";
 		stderrText += `${error instanceof Error ? error.message : String(error)}\n`;

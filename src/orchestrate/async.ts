@@ -312,7 +312,10 @@ export async function startAsyncSubagentRun(
 	try {
 		child = spawn(process.execPath, [workerPath(), payloadPath], {
 			cwd: options.cwd,
-			detached: process.platform !== "win32",
+			// Windows workers also need an independent process group so they
+			// survive the short-lived launcher. Graceful cancellation uses the
+			// interrupt marker on Windows; SIGKILL still uses taskkill /T /F.
+			detached: true,
 			stdio: ["ignore", workerLogFd, workerLogFd],
 		});
 	} finally {

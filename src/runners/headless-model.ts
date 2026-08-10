@@ -2,7 +2,7 @@ import { once } from "node:events";
 import { execFileSync, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, realpathSync } from "node:fs";
 import { readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAgentSystemPrompt, type AgentDefinition } from "../agents.ts";
 import {
@@ -560,6 +560,29 @@ function buildPrompt(options: RunHeadlessModelOptions): string {
 		.join("\n\n");
 }
 
+// On Windows a bare script (a fake pi, an npm shim, or any other non-`.exe`
+// command) cannot be spawned with shell:false (spawn EFTYPE) because Windows
+// has no shebang/exec semantics for scripts. Run such commands through the
+// current node runtime: node <script> <args...>.
+function effectiveSpawnCommand(
+	argv: readonly [string, ...string[]],
+): { command: string; args: string[] } {
+	if (process.platform !== "win32") {
+		return { command: argv[0], args: argv.slice(1) };
+	}
+	const extension = extname(argv[0]).toLowerCase();
+	if (
+		extension === ".exe" ||
+		extension === ".com" ||
+		extension === ".bat" ||
+		extension === ".cmd"
+	) {
+		return { command: argv[0], args: argv.slice(1) };
+	}
+	return { command: process.execPath, args: [...argv] };
+}
+
+
 // Normalize MSYS/Git-Bash style paths (/c/Users/...) to Windows drive paths
 // (C:/Users/...) so native Node fs calls work when pi is launched from bash.
 function normalizeHostPath(p: string): string {
@@ -803,7 +826,8 @@ async function runProcess(
 	}
 
 	return await new Promise<ProcessResult>((resolveProcess) => {
-		const child = spawn(argv[0], argv.slice(1), {
+		const { command, args } = effectiveSpawnCommand(argv);
+		const child = spawn(command, args, {
 			cwd,
 			shell: false,
 			detached: process.platform !== "win32",

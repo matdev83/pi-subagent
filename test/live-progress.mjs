@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { interopDefault: false });
-const lp = await jiti.import("./src/live-progress.ts");
+const lp = await jiti.import("../src/live-progress.ts");
 
 const results = [];
 function check(name, cond, extra = "") {

@@ -79,6 +79,7 @@ function sanitize(text: string): string {
  * Nth most recent subagent run of the current session.
  */
 export function registerSubagentWatchShortcuts(pi: ExtensionAPI): void {
+	if (typeof pi.registerShortcut !== "function") return;
 	for (let index = 1; index <= 9; index += 1) {
 		const digit = String(index) as Digit;
 		pi.registerShortcut(`ctrl+${digit}` as KeyId, {

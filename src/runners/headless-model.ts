@@ -565,14 +565,16 @@ function buildPrompt(options: RunHeadlessModelOptions): string {
 // earendil-works/pi#2464); spawning the node runtime with the actual cli script
 // (the one running us) avoids that on every platform.
 function resolvePiInvocation(): { command: string; args: string[] } {
+	const execName = basename(process.execPath).toLowerCase();
+	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
+		// Standalone pi executable (compiled Bun binary): spawn it directly.
+		// Checked first so a file-like user argument in argv[1] is never
+		// mistaken for a pi script (relevant on Linux/macOS binaries).
+		return { command: process.execPath, args: [] };
+	}
 	const currentScript = process.argv[1];
 	if (currentScript && existsSync(currentScript)) {
 		return { command: process.execPath, args: [currentScript] };
-	}
-	const execName = basename(process.execPath).toLowerCase();
-	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
-		// Standalone pi executable: spawn it directly.
-		return { command: process.execPath, args: [] };
 	}
 	return { command: "pi", args: [] };
 }

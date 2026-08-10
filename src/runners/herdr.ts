@@ -109,8 +109,14 @@ async function sleep(ms: number): Promise<void> {
 	await new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
+// Quote for the pane's shell: PowerShell on Windows ('' escape), POSIX
+// shells on Linux/macOS ('\'' escape, same as the tmux backend).
 function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", `''`)}'`;
+	const escaped = value.replaceAll(
+		"'",
+		process.platform === "win32" ? "''" : `'\\''`,
+	);
+	return `'${escaped}'`;
 }
 
 async function readWorkerMeta(path: string): Promise<WorkerMeta | undefined> {

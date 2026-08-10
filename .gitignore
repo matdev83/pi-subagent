@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Logs / temp
+*.log
+npm-debug.log*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

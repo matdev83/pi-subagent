@@ -89,7 +89,10 @@ function normalizeTimeoutMs(timeoutMs: number | undefined): number | undefined {
 
 async function herdrAvailable(): Promise<boolean> {
 	try {
-		await execFileAsync("herdr", ["status"], { timeout: 5000 });
+		await execFileAsync("herdr", ["status"], {
+			timeout: 5000,
+			windowsHide: process.platform === "win32",
+		});
 		return true;
 	} catch {
 		return false;
@@ -152,8 +155,8 @@ async function createHerdrWorkspace(
 ): Promise<HerdrWorkspace> {
 	const { stdout } = await execFileAsync(
 		"herdr",
-		["workspace", "create", "--cwd", cwd, "--label", label],
-		{ timeout: 15000 },
+		["workspace", "create", "--cwd", cwd, "--label", label, "--no-focus"],
+		{ timeout: 15000, windowsHide: process.platform === "win32" },
 	);
 	const parsed = JSON.parse(stdout) as {
 		error?: { message?: string; code?: string };
@@ -195,7 +198,7 @@ async function paneRunCommand(
 	await execFileAsync(
 		"herdr",
 		["pane", "run", paneId, commandLine],
-		{ timeout: 15000 },
+		{ timeout: 15000, windowsHide: process.platform === "win32" },
 	);
 }
 
@@ -203,6 +206,7 @@ async function closePane(paneId: string): Promise<void> {
 	try {
 		await execFileAsync("herdr", ["pane", "close", paneId], {
 			timeout: 10000,
+			windowsHide: process.platform === "win32",
 		});
 	} catch {
 		// Pane may already have exited; cleanup remains best-effort.
@@ -302,7 +306,8 @@ async function runHerdrProcess(options: RunHerdrProcessOptions): Promise<{
 	await sleep(500);
 
 	try {
-		// Run node <worker.mjs> directly in the pane (no bash wrapper needed).
+		// Run node <worker.mjs> directly in the non-focused pane. Herdr owns
+		// the terminal process; workspace creation never steals focus on Windows.
 		await paneRunCommand(workspace.paneId, [
 			process.execPath,
 			scriptPath,

@@ -130,6 +130,40 @@ function sanitizeRunText(text: string, currentSessionId?: string): string {
 	return sanitized;
 }
 
+function displayEventLine(text: string, currentSessionId?: string): string {
+	const sanitized = sanitizeRunText(text, currentSessionId).trim();
+	if (!sanitized.startsWith("{") || !sanitized.endsWith("}")) return sanitized;
+	try {
+		const event = JSON.parse(sanitized) as Record<string, unknown>;
+		const message = event.message;
+		if (typeof message === "string" && message.length > 0) return message;
+		if (message !== null && typeof message === "object") {
+			const record = message as Record<string, unknown>;
+			if (typeof record.text === "string" && record.text.length > 0)
+				return record.text;
+			if (Array.isArray(record.content)) {
+				const text = record.content
+					.map((part) =>
+						part !== null && typeof part === "object" &&
+							typeof (part as Record<string, unknown>).text === "string"
+							? (part as Record<string, unknown>).text as string
+							: "",
+					)
+					.filter(Boolean)
+					.join(" ");
+				if (text.length > 0) return text;
+			}
+		}
+		if (typeof event.text === "string" && event.text.length > 0)
+			return event.text;
+		// Do not expose raw protocol JSON in the panel.
+		if (typeof event.type === "string") return "";
+	} catch {
+		// Preserve malformed non-JSON diagnostics.
+	}
+	return sanitized;
+}
+
 function nowMs(): number {
 	const raw = process.env.PI_SUBAGENT_PANEL_NOW_MS;
 	if (raw !== undefined && raw.length > 0) {
@@ -394,7 +428,7 @@ async function readTextTail(
 	const text = await readFile(path, "utf8").catch(() => "");
 	return text
 		.split(/\r?\n/)
-		.map((line) => sanitizeRunText(line, currentSessionId))
+		.map((line) => displayEventLine(line, currentSessionId))
 		.filter(Boolean)
 		.slice(-LOG_TAIL_LINES);
 }
@@ -557,7 +591,7 @@ async function readRunFromRegistry(
 	const eventTail = loadTails
 		? eventsText
 				.split(/\r?\n/)
-				.map((line) => sanitizeRunText(line, currentSessionId))
+				.map((line) => displayEventLine(line, currentSessionId))
 				.filter(Boolean)
 				.slice(-LOG_TAIL_LINES)
 		: [];

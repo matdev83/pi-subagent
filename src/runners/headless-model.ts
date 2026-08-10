@@ -831,6 +831,7 @@ async function runProcess(
 			cwd,
 			shell: false,
 			detached: process.platform !== "win32",
+			windowsHide: process.platform === "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			...(env === undefined ? {} : { env }),
 		});

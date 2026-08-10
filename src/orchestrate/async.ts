@@ -312,10 +312,11 @@ export async function startAsyncSubagentRun(
 	try {
 		child = spawn(process.execPath, [workerPath(), payloadPath], {
 			cwd: options.cwd,
-			// Windows workers also need an independent process group so they
-			// survive the short-lived launcher. Graceful cancellation uses the
-			// interrupt marker on Windows; SIGKILL still uses taskkill /T /F.
+			// A detached Windows worker must not inherit the parent's console.
+			// windowsHide prevents a console window from flashing for every async
+			// subagent while the worker remains independently cancellable.
 			detached: true,
+			windowsHide: process.platform === "win32",
 			stdio: ["ignore", workerLogFd, workerLogFd],
 		});
 	} finally {

@@ -308,8 +308,11 @@ function extractEventTextFromLine(line: string): string {
 		const event = JSON.parse(line) as Record<string, unknown>;
 		const extracted = extractEventText(event);
 		if (extracted !== undefined && extracted.length > 0) return extracted;
+		// Protocol/control events are useful for artifacts but are not human
+		// output. Never dump their raw JSON into the compact watcher UI.
+		if (typeof event.type === "string") return "";
 	} catch {
-		// fall through to raw line
+		// Keep malformed non-protocol text visible for diagnosis.
 	}
 	return line;
 }
@@ -429,7 +432,7 @@ export class SubagentWatch implements Component {
 		lines.push(clip(style(this.theme, "muted", activity), safeWidth));
 		lines.push(style(this.theme, "border", border(safeWidth)));
 		lines.push(style(this.theme, "muted", "─ last output ─"));
-		const output = this.run.outputTail.slice(this.scrollOffset, this.scrollOffset + 10);
+		const output = this.run.outputTail;
 		if (output.length === 0) {
 			lines.push(style(this.theme, "muted", "(no output yet)"));
 		} else {

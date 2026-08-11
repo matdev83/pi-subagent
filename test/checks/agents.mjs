@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAgentSystemPrompt, loadAgentByName } from "../../src/agents.ts";
 import { buildPiArgv } from "../../src/runners/headless-model.ts";
-import { runSubagent, SubagentValidationError } from "../../api.mjs";
+import { resolveEffectiveTools } from "../../src/orchestrate/run.ts";
+import { runSubagent } from "../../api.mjs";
 
 const tempRoot = await mkdtemp(join(tmpdir(), "pi-subagent-agents-"));
 try {
@@ -249,54 +250,52 @@ OPEN_AGENT_PROMPT_MARKER
 		"extensions: [] should disable child extensions",
 	);
 
-	await assert.rejects(
-		() =>
-			runSubagent({
-				cwd,
-				backend: "inline",
-				agent: "review.security",
-				agentScope: "project",
-				confirmProjectAgents: false,
-				task: "check expansion",
-				tools: ["read", "write"],
-			}),
-		(error) =>
-			error instanceof SubagentValidationError &&
-			/caller tools expand/.test(error.message),
+	assert.deepEqual(
+		resolveEffectiveTools({ tools: ["read", "write"] }, agent),
+		["read"],
+		"call and profile tool lists should be intersected",
+	);
+	assert.deepEqual(
+		resolveEffectiveTools({ tools: ["write"] }, agent),
+		[],
+		"a disjoint call list should disable all tools rather than expand authority",
 	);
 
-	await assert.rejects(
-		() =>
-			runSubagent({
-				cwd,
-				backend: "inline",
-				agent: "review.security",
-				agentScope: "project",
-				confirmProjectAgents: false,
-				systemPrompt: "COMPILED",
-				task: "check compiled prompt expansion",
-				tools: ["write"],
-			}),
-		(error) =>
-			error instanceof SubagentValidationError &&
-			/caller tools expand/.test(error.message),
+	const inheritedToolsResult = await runSubagent({
+		cwd,
+		backend: "inline",
+		agent: "open",
+		agentScope: "project",
+		confirmProjectAgents: false,
+		task: "check inherited tools",
+		tools: [],
+	});
+	assert.notEqual(
+		inheritedToolsResult.failureKind,
+		"validation",
+		"an agent without tools should permit call-level narrowing",
 	);
 
-	await assert.rejects(
-		() =>
-			runSubagent({
-				cwd,
-				backend: "inline",
-				agent: "open",
-				agentScope: "project",
-				confirmProjectAgents: false,
-				task: "check undefined tools",
-				tools: ["read"],
-			}),
-		(error) =>
-			error instanceof SubagentValidationError &&
-			/does not declare a tools authority ceiling/.test(error.message),
+	await writeFile(
+		join(agentsOpenDir, "disabled.md"),
+		`---
+name: disabled-agent
+tools:
+---
+DISABLED_AGENT_PROMPT_MARKER
+`,
 	);
+	const disabledAgent = await loadAgentByName("disabled", cwd, "project");
+	assert.ok(disabledAgent);
+	assert.deepEqual(disabledAgent.tools, [], "an explicit empty tools list disables tools");
+	const disabledArgv = buildPiArgv({
+		agent: "disabled",
+		task: "check disabled tools",
+		cwd,
+		agentDefinition: disabledAgent,
+		tools: disabledAgent.tools,
+	});
+	assert.equal(disabledArgv.includes("--no-tools"), true);
 
 	const globalOnly = await loadAgentByName("review.security", cwd, "global");
 	assert.equal(

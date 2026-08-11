@@ -97,33 +97,17 @@ function parallelConcurrency(input: ResolveInput): number {
 	return Math.max(1, Math.min(MAX_PARALLEL_CONCURRENCY, requested));
 }
 
-function toolListLabel(tools: readonly string[] | undefined): string {
-	return tools === undefined
-		? "(unspecified)"
-		: tools.length === 0
-			? "(none)"
-			: tools.join(", ");
-}
-
-function resolveEffectiveTools(
+export function resolveEffectiveTools(
 	input: ResolveInput,
 	agentDefinition: AgentDefinition | undefined,
 ): string[] | undefined {
 	if (agentDefinition === undefined) return input.tools;
+	// Omitting tools in the profile inherits the child's complete ambient tool
+	// surface. Declaring tools (including an empty list) opts into restriction.
+	if (agentDefinition.tools === undefined) return input.tools;
 	if (input.tools === undefined) return agentDefinition.tools;
-	if (agentDefinition.tools === undefined) {
-		throw new SubagentToolAuthorityError(
-			`agent ${agentDefinition.displayName} does not declare a tools authority ceiling; caller tools cannot be applied safely.`,
-		);
-	}
-	const allowed = new Set(agentDefinition.tools);
-	const outside = input.tools.filter((tool) => !allowed.has(tool));
-	if (outside.length > 0) {
-		throw new SubagentToolAuthorityError(
-			`caller tools expand agent ${agentDefinition.displayName}; disallowed: ${outside.join(", ")}; allowed tools: ${toolListLabel(agentDefinition.tools)}`,
-		);
-	}
-	return input.tools;
+	const requested = new Set(input.tools);
+	return agentDefinition.tools.filter((tool) => requested.has(tool));
 }
 
 function failureKindFromError(error: unknown): FailureKind {

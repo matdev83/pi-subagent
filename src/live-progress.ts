@@ -79,7 +79,13 @@ export function attachProgress(
 	const existing = entries.get(toolCallId);
 	if (existing !== undefined) {
 		existing.invalidate = invalidate;
-		if (existing.cwd !== cwd) existing.cwd = cwd;
+		if (existing.cwd !== cwd) {
+			existing.cwd = cwd;
+			existing.runId = null;
+			existing.startedAt = Date.now();
+			existing.terminalTicks = 0;
+			progressCache.delete(toolCallId);
+		}
 		return;
 	}
 	entries.set(toolCallId, {

@@ -82,6 +82,10 @@ function sanitize(text: string): string {
  */
 export function registerSubagentWatchShortcuts(pi: ExtensionAPI): void {
 	if (typeof pi.registerShortcut !== "function") return;
+	pi.registerShortcut("ctrl+shift+u" as KeyId, {
+		description: "Open the most recent subagent run",
+		handler: (ctx) => void openSubagentWatch(ctx, 0),
+	});
 	for (let index = 1; index <= 9; index += 1) {
 		const digit = String(index) as Digit;
 		pi.registerShortcut(`alt+shift+${digit}` as KeyId, {

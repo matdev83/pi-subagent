@@ -47,7 +47,10 @@ import {
 	resetProgress,
 	type LiveProgress,
 } from "./live-progress.ts";
-import { registerSubagentWatchShortcuts } from "./watch.ts";
+import {
+	openSubagentWatch,
+	registerSubagentWatchShortcuts,
+} from "./watch.ts";
 import { WorkspacePolicyError } from "./workspace/worktree.ts";
 
 const TOOL_NAME = "subagent";
@@ -825,7 +828,13 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 	if (typeof pi.on === "function") {
 		pi.on("tool_execution_start", (event, ctx) => {
 			if (event.toolName !== TOOL_NAME) return;
-			attachProgress(event.toolCallId, ctx.cwd, () => undefined);
+			const requestedCwd =
+				isRecord(event.args) &&
+				typeof event.args.cwd === "string" &&
+				event.args.cwd.length > 0
+					? event.args.cwd
+					: ctx.cwd;
+			attachProgress(event.toolCallId, requestedCwd, () => undefined);
 		});
 		pi.on("tool_execution_end", (event) => {
 			if (event.toolName !== TOOL_NAME) return;
@@ -847,6 +856,11 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 						label: "panel",
 						description: "Open the live Subagents status panel",
 					},
+					{
+						value: "watch",
+						label: "watch [number]",
+						description: "Open one subagent run in a modal",
+					},
 				];
 				const filtered = items.filter((item) =>
 					item.value.startsWith(prefix.trim()),
@@ -858,11 +872,19 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 				const normalizedArgs = commandArgs
 					.replace(/^\/?subagent\b\s*/, "")
 					.trim();
-				if (normalizedArgs !== "panel") {
-					ctx.ui.notify?.("Usage: /subagent panel", "warning");
+				if (normalizedArgs === "panel") {
+					await showSubagentPanel(ctx);
 					return;
 				}
-				await showSubagentPanel(ctx);
+				const watchMatch = /^watch(?:\s+([1-9]))?$/.exec(normalizedArgs);
+				if (watchMatch !== null) {
+					await openSubagentWatch(ctx, Number(watchMatch[1] ?? "1") - 1);
+					return;
+				}
+				ctx.ui.notify?.(
+					"Usage: /subagent panel or /subagent watch [1-9]",
+					"warning",
+				);
 			},
 		});
 	}
@@ -1045,7 +1067,6 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 			escalateAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			killAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		}),
-		renderShell: "self",
 		renderCall(args, theme, context) {
 			const title = theme.fg("toolTitle", theme.bold("subagent"));
 			const summary = subagentCallSummary(args);
@@ -1054,7 +1075,11 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 				: summary;
 			const base = `${title} ${theme.fg("muted", rest)}`;
 			if (context?.toolCallId && typeof context.invalidate === "function") {
-				attachProgress(context.toolCallId, context.cwd, () =>
+				const requestedCwd =
+					typeof args.cwd === "string" && args.cwd.length > 0
+						? args.cwd
+						: context.cwd;
+				attachProgress(context.toolCallId, requestedCwd, () =>
 					context.invalidate(),
 				);
 				return new ProgressLineComponent(base, () =>

@@ -543,6 +543,8 @@ export class SubagentWatch implements Component {
 	private timer: NodeJS.Timeout | undefined;
 	private disposed = false;
 	private scrollOffset = 0;
+	private followTail = true;
+	private viewportHeight = 8;
 
 	constructor(
 		private readonly cwd: string,
@@ -553,12 +555,15 @@ export class SubagentWatch implements Component {
 		private readonly number: number,
 	) {
 		this.run = initial;
+		// Match pi-btw: request SGR mouse reporting while the focused overlay is open.
+		this.tui.terminal?.write?.("\x1b[?1000h\x1b[?1006h");
 		this.timer = setInterval(() => void this.refresh(), WATCH_REFRESH_MS);
 	}
 
 	dispose(): void {
 		this.disposed = true;
 		if (this.timer !== undefined) clearInterval(this.timer);
+		this.tui.terminal?.write?.("\x1b[?1000l\x1b[?1006l");
 	}
 
 	invalidate(): void {
@@ -571,15 +576,30 @@ export class SubagentWatch implements Component {
 			this.done();
 			return;
 		}
+		const mouseDelta = this.mouseScrollDelta(data);
+		if (mouseDelta !== null) {
+			this.scroll(mouseDelta);
+			return;
+		}
 		if (isArrowKey(data, "up") || data === "k") {
-			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
-			this.tui.requestRender?.();
+			this.scroll(-1);
 			return;
 		}
 		if (isArrowKey(data, "down") || data === "j") {
-			this.scrollOffset += 1;
-			this.tui.requestRender?.();
+			this.scroll(1);
 			return;
+		}
+		if (data === "pageup" || data === "\u001b[5~") {
+			this.scroll(-Math.max(1, this.viewportHeight - 1));
+			return;
+		}
+		if (data === "pagedown" || data === "\u001b[6~") {
+			this.scroll(Math.max(1, this.viewportHeight - 1));
+			return;
+		}
+		if (data === "end" || data === "\u001b[F" || data === "\u001b[4~") {
+			this.followTail = true;
+			this.tui.requestRender?.();
 		}
 	}
 
@@ -652,8 +672,14 @@ export class SubagentWatch implements Component {
 			6,
 			Math.min(22, Math.floor((process.stdout.rows ?? 30) * 0.58)),
 		);
+		this.viewportHeight = viewportHeight;
 		const maxScroll = Math.max(0, terminalLines.length - viewportHeight);
-		this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+		if (this.followTail) {
+			this.scrollOffset = maxScroll;
+		} else {
+			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+			if (this.scrollOffset >= maxScroll) this.followTail = true;
+		}
 		const visibleOutput = terminalLines.slice(
 			this.scrollOffset,
 			this.scrollOffset + viewportHeight,
@@ -667,12 +693,26 @@ export class SubagentWatch implements Component {
 				style(
 					this.theme,
 					"dim",
-					`terminal · ↑${this.scrollOffset} ↓${Math.max(0, maxScroll - this.scrollOffset)} · ↑↓/jk scroll · q/esc close`,
+					`↑${this.scrollOffset} ↓${Math.max(0, maxScroll - this.scrollOffset)} · ${this.followTail ? "following tail" : "paused"} · wheel/↑↓/jk · End follow · q/esc close`,
 				),
 			),
 		);
 		lines.push(borderLine("bottom"));
 		return lines.map(fitLine);
+	}
+
+	private scroll(delta: number): void {
+		if (delta < 0) this.followTail = false;
+		this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+		this.tui.requestRender?.();
+	}
+
+	private mouseScrollDelta(data: string): number | null {
+		const match = data.match(/^\x1b\[<(\d+);\d+;\d+[Mm]$/);
+		if (match === null) return null;
+		const button = Number(match[1]);
+		if ((button & 64) !== 64) return null;
+		return (button & 1) === 0 ? -3 : 3;
 	}
 
 	private renderTranscript(width: number): string[] {

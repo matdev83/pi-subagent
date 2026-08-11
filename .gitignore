@@ -5,6 +5,10 @@ node_modules/
 *.log
 npm-debug.log*
 
+# Local agent state and codegraph indexes
+.pi/
+.codegraph/
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

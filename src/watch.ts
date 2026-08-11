@@ -75,19 +75,21 @@ function sanitize(text: string): string {
 }
 
 /**
- * Register ctrl+1…9 / ctrl+alt+1…9 shortcuts opening the watcher modal for the
- * Nth most recent subagent run of the current session.
+ * Register alt+shift+1…9 / ctrl+shift+1…9 shortcuts opening the watcher modal
+ * for the Nth most recent subagent run of the current session. Ctrl+number is
+ * intentionally avoided: terminals and host interrupt/keybinding layers can
+ * encode those chords inconsistently on Windows.
  */
 export function registerSubagentWatchShortcuts(pi: ExtensionAPI): void {
 	if (typeof pi.registerShortcut !== "function") return;
 	for (let index = 1; index <= 9; index += 1) {
 		const digit = String(index) as Digit;
-		pi.registerShortcut(`ctrl+${digit}` as KeyId, {
+		pi.registerShortcut(`alt+shift+${digit}` as KeyId, {
 			description: `Open progress of subagent #${index}`,
 			handler: (ctx) => void openSubagentWatch(ctx, index - 1),
 		});
-		pi.registerShortcut(`ctrl+alt+${digit}` as KeyId, {
-			description: `Open progress of subagent #${index} (alt)`,
+		pi.registerShortcut(`ctrl+shift+${digit}` as KeyId, {
+			description: `Open progress of subagent #${index} (alternate)`,
 			handler: (ctx) => void openSubagentWatch(ctx, index - 1),
 		});
 	}

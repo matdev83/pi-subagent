@@ -179,6 +179,7 @@ class ProgressLineComponent {
 	constructor(
 		private readonly base: string,
 		private readonly getProgress: () => LiveProgress | undefined,
+		private readonly startedAt = Date.now(),
 	) {}
 
 	invalidate(): void {
@@ -187,8 +188,10 @@ class ProgressLineComponent {
 
 	render(width: number): string[] {
 		const progress = this.getProgress();
-		if (progress === undefined) return [clip(this.base, width)];
-		const suffix = formatProgress(progress);
+		const suffix =
+			progress === undefined
+				? `${Math.max(0, Math.floor((Date.now() - this.startedAt) / 1_000))}s · starting`
+				: formatProgress(progress);
 		const separator = " · ";
 		const baseWidth = Math.max(
 			4,
@@ -1042,6 +1045,7 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 			escalateAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			killAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		}),
+		renderShell: "self",
 		renderCall(args, theme, context) {
 			const title = theme.fg("toolTitle", theme.bold("subagent"));
 			const summary = subagentCallSummary(args);

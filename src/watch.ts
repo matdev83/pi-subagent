@@ -111,9 +111,15 @@ export async function openSubagentWatch(
 	}
 	const cwd = ctx.cwd;
 	const sessionId = currentSessionIdFromCtx(ctx);
-	const runs = await listSessionRuns(cwd, sessionId);
+	let runs = await listSessionRuns(cwd, sessionId);
+	if (runs.length === 0 && sessionId !== undefined) {
+		// A run can predate session metadata propagation or come from a host
+		// compatibility path. Fall back to cwd rather than making the shortcut
+		// appear dead.
+		runs = await listSessionRuns(cwd, undefined);
+	}
 	if (runs.length === 0) {
-		ctx.ui.notify?.("No subagent runs in this session yet.", "info");
+		ctx.ui.notify?.("No subagent runs found in this workspace.", "info");
 		return;
 	}
 	if (index >= runs.length) {

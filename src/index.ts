@@ -291,10 +291,27 @@ function textResult(
 	details?: unknown,
 ): ToolResult {
 	return {
-		content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+		content: [{ type: "text", text: JSON.stringify(payload) }],
 		details,
 		isError,
 	};
+}
+
+function resultSummary(payload: unknown): string {
+	if (!isRecord(payload)) return "Done";
+	const status = displayText(payload.status, 20) ?? "completed";
+	const runId = displayText(payload.runId, 32);
+	const backend = displayText(payload.backend, 16);
+	const failureKind = displayText(payload.failureKind, 24);
+	if (status === "running")
+		return ["Started", backend, runId].filter(Boolean).join(" · ");
+	if (status === "completed")
+		return ["Completed", backend, runId].filter(Boolean).join(" · ");
+	if (status === "cancelled")
+		return ["Cancelled", failureKind, runId].filter(Boolean).join(" · ");
+	if (status === "failed")
+		return ["Failed", failureKind, runId].filter(Boolean).join(" · ");
+	return [status, runId].filter(Boolean).join(" · ");
 }
 
 function artifactSummary(artifacts: readonly ArtifactRef[]) {
@@ -803,6 +820,15 @@ function notifyCompletion(
 export default function registerSubagentEngine(pi: ExtensionAPI) {
 	registerSubagentWatchShortcuts(pi);
 	if (typeof pi.on === "function") {
+		pi.on("tool_execution_start", (event, ctx) => {
+			if (event.toolName !== TOOL_NAME) return;
+			attachProgress(event.toolCallId, ctx.cwd, () => undefined);
+		});
+		pi.on("tool_execution_end", (event) => {
+			if (event.toolName !== TOOL_NAME) return;
+			// Keep the final cached snapshot for the settled row; the tracker
+			// auto-detaches after observing the terminal result.
+		});
 		pi.on("session_shutdown", () => {
 			resetProgress();
 		});
@@ -1032,6 +1058,34 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 				);
 			}
 			return new SingleLineComponent(base);
+		},
+		renderResult(result, options, theme) {
+			const payload = result.details ?? (() => {
+				const text = result.content.find(
+					(item): item is ToolTextContent => item.type === "text",
+				)?.text;
+				if (text === undefined) return undefined;
+				try {
+					return JSON.parse(text) as unknown;
+				} catch {
+					return text;
+				}
+			})();
+			const summary = resultSummary(
+				isRecord(payload) && "result" in payload ? payload.result : payload,
+			);
+			const settledStatus =
+				isRecord(payload) && "result" in payload && isRecord(payload.result)
+					? payload.result.status
+					: isRecord(payload)
+						? payload.status
+						: undefined;
+			const color = options.isPartial
+				? "warning"
+				: settledStatus === "failed" || settledStatus === "cancelled"
+					? "error"
+					: "success";
+			return new SingleLineComponent(theme.fg(color, summary));
 		},
 		async execute(...executeArgs: unknown[]) {
 			const { params, signal, onUpdate, ctx } =

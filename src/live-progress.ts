@@ -76,7 +76,12 @@ export function attachProgress(
 	cwd: string,
 	invalidate: () => void,
 ): void {
-	if (entries.has(toolCallId)) return;
+	const existing = entries.get(toolCallId);
+	if (existing !== undefined) {
+		existing.invalidate = invalidate;
+		if (existing.cwd !== cwd) existing.cwd = cwd;
+		return;
+	}
 	entries.set(toolCallId, {
 		toolCallId,
 		cwd,

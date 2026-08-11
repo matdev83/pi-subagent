@@ -1,7 +1,8 @@
-// Per-subagent progress watcher: keyboard shortcuts (ctrl+1…9, ctrl+alt+1…9)
-// that open a modal overlay showing the live session progress of the Nth most
-// recent subagent run in the current pi session.
+// Per-subagent progress watcher: command/shortcut access to a modal overlay
+// showing live progress for a selected run in the current pi session.
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Component, KeyId } from "@earendil-works/pi-tui";
@@ -11,7 +12,8 @@ import { clip, stripAnsi } from "./core/text-width.ts";
 
 const WATCH_REFRESH_MS = 1_000;
 const RUNS_DIR = ".pi/agent/runs";
-const TAIL_LINES = 10;
+const TAIL_LINES = 24;
+const execFileAsync = promisify(execFile);
 const TAIL_BYTES = 16_384;
 const PROGRESS_FILES = ["pi-events.jsonl", "output.log", "stderr.log", "result.json"];
 
@@ -149,10 +151,11 @@ export async function openSubagentWatch(
 		{
 			overlay: true,
 			overlayOptions: {
-				width: "62%",
-				maxHeight: "55%",
+				width: "88%",
+				maxHeight: "82%",
 				anchor: "center",
-				minWidth: 60,
+				minWidth: 84,
+				margin: 1,
 			},
 		},
 	);
@@ -243,6 +246,15 @@ async function loadRunProgress(
 		outputTail = meaningfulLines(output).slice(-TAIL_LINES);
 		lastActivityAt = newestMtime;
 	}
+	const herdrPaneId = readHerdrPaneId(record, latestAttemptId);
+	if (herdrPaneId !== null) {
+		const paneOutput = await readHerdrPane(herdrPaneId);
+		if (paneOutput.length > 0) {
+			outputTail = paneOutput;
+			lastLine = paneOutput.at(-1) ?? lastLine;
+			lastActivityAt = nowMs();
+		}
+	}
 	const task = await readTask(runDir, latestAttemptId);
 	const runId = typeof record.runId === "string" ? record.runId : dir;
 	return {
@@ -261,6 +273,53 @@ async function loadRunProgress(
 				? Date.parse(record.completedAt)
 				: null,
 	};
+}
+
+function readHerdrPaneId(
+	record: Record<string, unknown>,
+	attemptId: string | null,
+): string | null {
+	const attempts = Array.isArray(record.attempts) ? record.attempts : [];
+	const attempt = attempts.find(
+		(value) =>
+			value !== null &&
+			typeof value === "object" &&
+			(attemptId === null ||
+				(value as Record<string, unknown>).attemptId === attemptId),
+	);
+	if (attempt === undefined || attempt === null || typeof attempt !== "object")
+		return null;
+	const herdr = (attempt as Record<string, unknown>).herdr;
+	if (herdr === null || typeof herdr !== "object") return null;
+	const paneId = (herdr as Record<string, unknown>).paneId;
+	return typeof paneId === "string" && paneId.length > 0 ? paneId : null;
+}
+
+async function readHerdrPane(paneId: string): Promise<string[]> {
+	try {
+		const { stdout } = await execFileAsync(
+			"herdr",
+			[
+				"pane",
+				"read",
+				paneId,
+				"--source",
+				"recent-unwrapped",
+				"--lines",
+				String(TAIL_LINES),
+				"--format",
+				"text",
+			],
+			{ timeout: 2_000, windowsHide: process.platform === "win32" },
+		);
+		return stdout
+			.split(/\r?\n/)
+			.map((line) => sanitize(line))
+			.filter((line) => line.length > 0)
+			.slice(-TAIL_LINES);
+	} catch {
+		return [];
+	}
 }
 
 async function readTask(
@@ -416,6 +475,14 @@ export class SubagentWatch implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(20, width);
+		const contentWidth = Math.max(1, safeWidth - 4);
+		const row = (text: string): string => {
+			const clipped = clip(text, contentWidth);
+			const padding = " ".repeat(
+				Math.max(0, contentWidth - stripAnsi(clipped).length),
+			);
+			return `${style(this.theme, "border", "│")} ${clipped}${padding} ${style(this.theme, "border", "│")}`;
+		};
 		const run = this.run;
 		const lines: string[] = [];
 		const statusColor =
@@ -431,25 +498,20 @@ export class SubagentWatch implements Component {
 				? fmtDuration(run.completedAt - run.startedAt)
 				: fmtDuration(nowMs() - run.startedAt);
 		lines.push(style(this.theme, "border", border(safeWidth)));
-		lines.push(
-			clip(
-				`${title} · ${status} · ${elapsed} · ${run.runId}`,
-				safeWidth,
-			),
-		);
-		lines.push(style(this.theme, "border", border(safeWidth)));
+		lines.push(row(`${title} · ${status} · ${elapsed} · ${run.runId}`));
+		lines.push(row(style(this.theme, "border", "─".repeat(contentWidth))));
 		const task = run.task.length > 0 ? `task: ${run.task}` : "";
-		if (task.length > 0) lines.push(clip(style(this.theme, "muted", task), safeWidth));
+		if (task.length > 0) lines.push(row(style(this.theme, "muted", task)));
 		const activity = `last activity ${fmtAge(run.lastActivityAt)} · attempt ${run.attemptId ?? "—"} · ${run.backend || "?"} backend`;
-		lines.push(clip(style(this.theme, "muted", activity), safeWidth));
-		lines.push(style(this.theme, "border", border(safeWidth)));
-		lines.push(style(this.theme, "muted", "─ last output ─"));
+		lines.push(row(style(this.theme, "muted", activity)));
+		lines.push(row(style(this.theme, "border", "─".repeat(contentWidth))));
+		lines.push(row(style(this.theme, "muted", "live terminal output")));
 		const output = this.run.outputTail;
 		if (output.length === 0) {
-			lines.push(style(this.theme, "muted", "(no output yet)"));
+			lines.push(row(style(this.theme, "muted", "(no terminal output available)")));
 		} else {
-			for (const line of output.slice(this.scrollOffset, this.scrollOffset + 10)) {
-				lines.push(clip(line, safeWidth));
+			for (const line of output.slice(this.scrollOffset, this.scrollOffset + 18)) {
+				lines.push(row(line));
 			}
 		}
 		lines.push(style(this.theme, "border", borderBottom(safeWidth)));

@@ -66,7 +66,11 @@ const joined = lines.join("\n");
 check("render produces lines", lines.length >= 6, `lines=${lines.length}`);
 check("title shows subagent #1", joined.includes("subagent #1"), lines[1]);
 check("status shown", joined.includes("running"));
-check("runId shown (possibly clipped)", joined.includes("run_w"), lines[1]);
+check(
+	"runId shown (possibly clipped)",
+	joined.includes("r…") || joined.includes("run_w"),
+	lines[1],
+);
 check("output tail shown", joined.includes("All tests passed."));
 check("footer shows close hint", joined.includes("q/esc"));
 

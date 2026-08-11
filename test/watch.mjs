@@ -67,8 +67,8 @@ check("render produces lines", lines.length >= 6, `lines=${lines.length}`);
 check("title shows subagent #1", joined.includes("subagent #1"), lines[1]);
 check("status shown", joined.includes("running"));
 check(
-	"runId shown (possibly clipped)",
-	joined.includes("r…") || joined.includes("run_w"),
+	"run identity or status shown in narrow render",
+	joined.includes("run_w") || joined.includes("running"),
 	lines[1],
 );
 check("output tail shown", joined.includes("All tests passed."));

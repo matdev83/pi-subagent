@@ -5,7 +5,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { Component, KeyId } from "@earendil-works/pi-tui";
+import {
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+	type Component,
+	type KeyId,
+} from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LiveProgress } from "./live-progress.ts";
 import { clip, stripAnsi } from "./core/text-width.ts";
@@ -151,11 +157,11 @@ export async function openSubagentWatch(
 		{
 			overlay: true,
 			overlayOptions: {
-				width: "88%",
-				maxHeight: "82%",
-				anchor: "center",
-				minWidth: 84,
-				margin: 1,
+				width: "78%",
+				maxHeight: "78%",
+				anchor: "top-center",
+				minWidth: 72,
+				margin: { top: 1, left: 2, right: 2 },
 			},
 		},
 	);
@@ -474,15 +480,23 @@ export class SubagentWatch implements Component {
 	}
 
 	render(width: number): string[] {
-		const safeWidth = Math.max(20, width);
-		const contentWidth = Math.max(1, safeWidth - 4);
-		const row = (text: string): string => {
-			const clipped = clip(text, contentWidth);
-			const padding = " ".repeat(
-				Math.max(0, contentWidth - stripAnsi(clipped).length),
-			);
-			return `${style(this.theme, "border", "│")} ${clipped}${padding} ${style(this.theme, "border", "│")}`;
+		const dialogWidth = Math.max(24, width);
+		const innerWidth = Math.max(22, dialogWidth - 2);
+		const frameLine = (content: string): string => {
+			const truncated = truncateToWidth(content, innerWidth, "");
+			const padding = Math.max(0, innerWidth - visibleWidth(truncated));
+			return `${style(this.theme, "border", "│")}${truncated}${" ".repeat(padding)}${style(this.theme, "border", "│")}`;
 		};
+		const borderLine = (edge: "top" | "bottom"): string =>
+			style(
+				this.theme,
+				"border",
+				`${edge === "top" ? "┌" : "└"}${"─".repeat(innerWidth)}${edge === "top" ? "┐" : "┘"}`,
+			);
+		const ruleLine = (): string =>
+			style(this.theme, "border", `├${"─".repeat(innerWidth)}┤`);
+		const fitLine = (line: string): string =>
+			visibleWidth(line) > width ? truncateToWidth(line, width, "") : line;
 		const run = this.run;
 		const lines: string[] = [];
 		const statusColor =
@@ -497,26 +511,46 @@ export class SubagentWatch implements Component {
 			run.completedAt !== null && run.completedAt > 0
 				? fmtDuration(run.completedAt - run.startedAt)
 				: fmtDuration(nowMs() - run.startedAt);
-		lines.push(style(this.theme, "border", border(safeWidth)));
-		lines.push(row(`${title} · ${status} · ${elapsed} · ${run.runId}`));
-		lines.push(row(style(this.theme, "border", "─".repeat(contentWidth))));
-		const task = run.task.length > 0 ? `task: ${run.task}` : "";
-		if (task.length > 0) lines.push(row(style(this.theme, "muted", task)));
+		lines.push(borderLine("top"));
+		lines.push(frameLine(`${title} · ${status} · ${elapsed} · ${run.runId}`));
 		const activity = `last activity ${fmtAge(run.lastActivityAt)} · attempt ${run.attemptId ?? "—"} · ${run.backend || "?"} backend`;
-		lines.push(row(style(this.theme, "muted", activity)));
-		lines.push(row(style(this.theme, "border", "─".repeat(contentWidth))));
-		lines.push(row(style(this.theme, "muted", "live terminal output")));
+		lines.push(frameLine(style(this.theme, "muted", activity)));
+		lines.push(ruleLine());
+		const taskLines = run.task.length > 0
+			? wrapTextWithAnsi(`task: ${run.task}`, innerWidth)
+			: [];
+		for (const line of taskLines) lines.push(frameLine(style(this.theme, "muted", line)));
+		if (taskLines.length > 0) lines.push(ruleLine());
 		const output = this.run.outputTail;
-		if (output.length === 0) {
-			lines.push(row(style(this.theme, "muted", "(no terminal output available)")));
-		} else {
-			for (const line of output.slice(this.scrollOffset, this.scrollOffset + 18)) {
-				lines.push(row(line));
-			}
-		}
-		lines.push(style(this.theme, "border", borderBottom(safeWidth)));
-		lines.push(style(this.theme, "dim", "↑↓/jk scroll · q/esc close"));
-		return lines;
+		const terminalLines =
+			output.length === 0
+				? [style(this.theme, "muted", "(no terminal output available)")]
+				: output.flatMap((line) => wrapTextWithAnsi(line, innerWidth));
+		const viewportHeight = Math.max(
+			6,
+			Math.min(22, Math.floor((process.stdout.rows ?? 30) * 0.58)),
+		);
+		const maxScroll = Math.max(0, terminalLines.length - viewportHeight);
+		this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+		const visibleOutput = terminalLines.slice(
+			this.scrollOffset,
+			this.scrollOffset + viewportHeight,
+		);
+		for (const line of visibleOutput) lines.push(frameLine(line));
+		for (let index = visibleOutput.length; index < viewportHeight; index += 1)
+			lines.push(frameLine(""));
+		lines.push(ruleLine());
+		lines.push(
+			frameLine(
+				style(
+					this.theme,
+					"dim",
+					`terminal · ↑${this.scrollOffset} ↓${Math.max(0, maxScroll - this.scrollOffset)} · ↑↓/jk scroll · q/esc close`,
+				),
+			),
+		);
+		lines.push(borderLine("bottom"));
+		return lines.map(fitLine);
 	}
 
 }

@@ -79,9 +79,10 @@ function thinkingValue(value: unknown): ThinkingLevel | undefined {
 function toolsValue(value: unknown): string[] | undefined {
 	if (!Array.isArray(value) && typeof value !== "string") return undefined;
 	const raw = Array.isArray(value) ? value : value.split(",");
-	return uniqueStrings(
+	const tools = uniqueStrings(
 		raw.map((entry) => (typeof entry === "string" ? entry.trim() : undefined)),
 	);
+	return tools.length > 0 ? tools : undefined;
 }
 
 function toDottedName(path: string): string {
@@ -298,9 +299,7 @@ export function parseAgentMarkdown(
 		frontmatter,
 		model: stringValue(frontmatter.model),
 		thinking: thinkingValue(frontmatter.thinking),
-		tools: Object.hasOwn(frontmatter, "tools")
-			? (toolsValue(frontmatter.tools) ?? [])
-			: undefined,
+		tools: toolsValue(frontmatter.tools),
 		systemPromptMode: stringValue(frontmatter.systemPromptMode),
 	};
 }

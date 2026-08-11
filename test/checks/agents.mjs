@@ -287,15 +287,20 @@ DISABLED_AGENT_PROMPT_MARKER
 	);
 	const disabledAgent = await loadAgentByName("disabled", cwd, "project");
 	assert.ok(disabledAgent);
-	assert.deepEqual(disabledAgent.tools, [], "an explicit empty tools list disables tools");
-	const disabledArgv = buildPiArgv({
+	assert.equal(
+		disabledAgent.tools,
+		undefined,
+		"an explicit empty tools list should inherit all ambient tools",
+	);
+	const permissiveArgv = buildPiArgv({
 		agent: "disabled",
-		task: "check disabled tools",
+		task: "check permissive empty tools",
 		cwd,
 		agentDefinition: disabledAgent,
 		tools: disabledAgent.tools,
 	});
-	assert.equal(disabledArgv.includes("--no-tools"), true);
+	assert.equal(permissiveArgv.includes("--tools"), false);
+	assert.equal(permissiveArgv.includes("--no-tools"), false);
 
 	const globalOnly = await loadAgentByName("review.security", cwd, "global");
 	assert.equal(

@@ -102,8 +102,8 @@ export function resolveEffectiveTools(
 	agentDefinition: AgentDefinition | undefined,
 ): string[] | undefined {
 	if (agentDefinition === undefined) return input.tools;
-	// Omitting tools in the profile inherits the child's complete ambient tool
-	// surface. Declaring tools (including an empty list) opts into restriction.
+	// Missing or empty profile tools inherit the child's complete ambient tool
+	// surface. Only a non-empty list opts into restriction.
 	if (agentDefinition.tools === undefined) return input.tools;
 	if (input.tools === undefined) return agentDefinition.tools;
 	const requested = new Set(input.tools);

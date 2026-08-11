@@ -228,7 +228,7 @@ The locator index is only a pointer for finding runs across cwd boundaries. `run
 | `cancelSiblingsOnFailure` | For synchronous parallel runs, abort already-running siblings after the first failed result; implies fail-fast scheduling. |
 | `model` | Select a Pi model/provider for model-backed workers. |
 | `thinking` / `thinkingLevel` / `reasoningLevel` | Set the reasoning level. |
-| `tools` | Optional tool allowlist. Agent profiles with no `tools` field inherit all ambient child tools. A declared profile list restricts access; call-level tools intersect with it. For agentless runs this sets the full allowlist. |
+| `tools` | Optional tool allowlist. Agent profiles with no `tools` field or an empty field inherit all ambient child tools. Only a non-empty profile list restricts access; call-level tools intersect with it. For agentless runs this sets the full allowlist. |
 | `roleContext` | Add one-off role instructions without creating an agent file. |
 | `agentScope` | Restrict agent lookup to `auto`, `global`, or `project`. |
 | `confirmProjectAgents` | Defaults to `false`. Set `true` to require project-agent confirmation in interactive tool calls; code API calls with `true` reject project-local agents because they cannot prompt. |
@@ -349,7 +349,7 @@ Child sessions load Pi's normal ambient extensions and skills by default, so pac
 
 When `agent` names a Pi agent markdown file, the engine injects that agent's body as system prompt context and inherits supported frontmatter such as `model`, `thinking`, and `tools`.
 
-Agent files inherit the child session's complete ambient tool surface when `tools` is omitted. Add a `tools` field only when the profile should be restricted; an empty list disables all tools. If both the profile and call provide `tools`, the effective set is their intersection, so either side may narrow access without expanding the profile's declared set.
+Agent files inherit the child session's complete ambient tool surface when `tools` is omitted or empty. Add a non-empty `tools` list only when the profile should be restricted. If both the profile and call provide non-empty `tools` lists, the effective set is their intersection, so either side may narrow access without expanding the profile's declared set.
 
 For agentless model-backed runs, call-level `tools` can set the full tool allowlist. Use `tools: []` to run an agentless task with no tools.
 

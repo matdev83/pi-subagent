@@ -12,7 +12,15 @@ import {
 	type Component,
 	type KeyId,
 } from "@earendil-works/pi-tui";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	AssistantMessageComponent,
+	ToolExecutionComponent,
+	getMarkdownTheme,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { TUI } from "@earendil-works/pi-tui";
 import type { LiveProgress } from "./live-progress.ts";
 import { clip, stripAnsi } from "./core/text-width.ts";
 
@@ -35,10 +43,25 @@ interface WatchTui {
 }
 
 /** Minimal view of a run + live progress for the modal. */
+interface TranscriptTool {
+	type: "tool";
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	result?: unknown;
+	isError: boolean;
+	isPartial: boolean;
+}
+
+type TranscriptItem =
+	| { type: "assistant"; message: AssistantMessage; streaming: boolean }
+	| TranscriptTool;
+
 interface WatchRun extends LiveProgress {
 	dir: string;
 	task: string;
 	outputTail: string[];
+	transcript: TranscriptItem[];
 }
 
 function style(theme: WatchTheme, color: string, text: string): string {
@@ -149,7 +172,7 @@ export async function openSubagentWatch(
 			new SubagentWatch(
 				cwd,
 				theme as WatchTheme,
-				tui as WatchTui,
+				tui as WatchTui & TUI,
 				done,
 				target,
 				index + 1,
@@ -252,13 +275,21 @@ async function loadRunProgress(
 		outputTail = meaningfulLines(output).slice(-TAIL_LINES);
 		lastActivityAt = newestMtime;
 	}
-	const herdrPaneId = readHerdrPaneId(record, latestAttemptId);
-	if (herdrPaneId !== null) {
-		const paneOutput = await readHerdrPane(herdrPaneId);
-		if (paneOutput.length > 0) {
-			outputTail = paneOutput;
-			lastLine = paneOutput.at(-1) ?? lastLine;
-			lastActivityAt = nowMs();
+	const transcript =
+		latestAttemptId === null
+			? []
+			: await readPiTranscript(
+					join(runDir, "attempts", latestAttemptId, "pi-events.jsonl"),
+				);
+	if (transcript.length === 0) {
+		const herdrPaneId = readHerdrPaneId(record, latestAttemptId);
+		if (herdrPaneId !== null) {
+			const paneOutput = await readHerdrPane(herdrPaneId);
+			if (paneOutput.length > 0) {
+				outputTail = paneOutput;
+				lastLine = paneOutput.at(-1) ?? lastLine;
+				lastActivityAt = nowMs();
+			}
 		}
 	}
 	const task = await readTask(runDir, latestAttemptId);
@@ -274,11 +305,99 @@ async function loadRunProgress(
 		lastLine: clip(sanitize(lastLine), 90),
 		task: clip(sanitize(task), 90),
 		outputTail: outputTail.map((line) => clip(sanitize(line), 90)),
+		transcript,
 		completedAt:
 			typeof record.completedAt === "string"
 				? Date.parse(record.completedAt)
 				: null,
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object";
+}
+
+async function readPiTranscript(file: string): Promise<TranscriptItem[]> {
+	const text = await readFile(file, "utf8").catch(() => "");
+	if (text.length === 0) return [];
+	const items: TranscriptItem[] = [];
+	const tools = new Map<string, TranscriptTool>();
+	for (const line of text.split(/\r?\n/)) {
+		if (line.length === 0) continue;
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			continue;
+		}
+		if (
+			(event.type === "message_start" || event.type === "message_end") &&
+			isRecord(event.message) &&
+			event.message.role === "assistant"
+		) {
+			const existing = items.findLast(
+				(item) => item.type === "assistant" && item.streaming,
+			);
+			if (event.type === "message_end" && existing?.type === "assistant") {
+				existing.message = event.message as unknown as AssistantMessage;
+				existing.streaming = false;
+			} else if (event.type === "message_start") {
+				items.push({
+					type: "assistant",
+					message: event.message as unknown as AssistantMessage,
+					streaming: true,
+				});
+			}
+			continue;
+		}
+		if (event.type === "message_update" && isRecord(event.assistantMessageEvent)) {
+			const update = event.assistantMessageEvent;
+			const current = items.findLast(
+				(item) => item.type === "assistant" && item.streaming,
+			);
+			if (current?.type !== "assistant") continue;
+			const index = typeof update.contentIndex === "number" ? update.contentIndex : 0;
+			const content = current.message.content as unknown as Array<
+				Record<string, unknown>
+			>;
+			if (update.type === "text_delta" && typeof update.delta === "string") {
+				const part = content[index];
+				if (isRecord(part) && part.type === "text") part.text = `${part.text ?? ""}${update.delta}`;
+				else content[index] = { type: "text", text: update.delta };
+			}
+			if (update.type === "thinking_delta" && typeof update.delta === "string") {
+				const part = content[index];
+				if (isRecord(part) && part.type === "thinking") part.thinking = `${part.thinking ?? ""}${update.delta}`;
+				else content[index] = { type: "thinking", thinking: update.delta };
+			}
+			continue;
+		}
+		if (event.type === "tool_execution_start" && typeof event.toolCallId === "string") {
+			const tool: TranscriptTool = {
+				type: "tool",
+				toolCallId: event.toolCallId,
+				toolName: typeof event.toolName === "string" ? event.toolName : "tool",
+				args: event.args ?? {},
+				isError: false,
+				isPartial: true,
+			};
+			tools.set(tool.toolCallId, tool);
+			items.push(tool);
+			continue;
+		}
+		if (
+			(event.type === "tool_execution_update" || event.type === "tool_execution_end") &&
+			typeof event.toolCallId === "string"
+		) {
+			const tool = tools.get(event.toolCallId);
+			if (tool === undefined) continue;
+			tool.result =
+				event.type === "tool_execution_update" ? event.partialResult : event.result;
+			tool.isPartial = event.type === "tool_execution_update";
+			tool.isError = event.type === "tool_execution_end" && event.isError === true;
+		}
+	}
+	return items.slice(-20);
 }
 
 function readHerdrPaneId(
@@ -428,7 +547,7 @@ export class SubagentWatch implements Component {
 	constructor(
 		private readonly cwd: string,
 		private readonly theme: WatchTheme,
-		private readonly tui: WatchTui,
+		private readonly tui: WatchTui & TUI,
 		private readonly done: () => void,
 		initial: WatchRun,
 		private readonly number: number,
@@ -521,11 +640,14 @@ export class SubagentWatch implements Component {
 			: [];
 		for (const line of taskLines) lines.push(frameLine(style(this.theme, "muted", line)));
 		if (taskLines.length > 0) lines.push(ruleLine());
+		const transcriptLines = this.renderTranscript(innerWidth);
 		const output = this.run.outputTail;
 		const terminalLines =
-			output.length === 0
-				? [style(this.theme, "muted", "(no terminal output available)")]
-				: output.flatMap((line) => wrapTextWithAnsi(line, innerWidth));
+			transcriptLines.length > 0
+				? transcriptLines
+				: output.length === 0
+					? [style(this.theme, "muted", "(no session output available)")]
+					: output.flatMap((line) => wrapTextWithAnsi(line, innerWidth));
 		const viewportHeight = Math.max(
 			6,
 			Math.min(22, Math.floor((process.stdout.rows ?? 30) * 0.58)),
@@ -551,6 +673,61 @@ export class SubagentWatch implements Component {
 		);
 		lines.push(borderLine("bottom"));
 		return lines.map(fitLine);
+	}
+
+	private renderTranscript(width: number): string[] {
+		const lines: string[] = [];
+		for (const item of this.run.transcript ?? []) {
+			if (item.type === "assistant") {
+				const component = new AssistantMessageComponent(
+					item.message,
+					false,
+					getMarkdownTheme(),
+					"Thinking...",
+					0,
+				);
+				component.updateContent(item.message, item.streaming);
+				lines.push(...component.render(width));
+				continue;
+			}
+			const component = new ToolExecutionComponent(
+				item.toolName,
+				item.toolCallId,
+				item.args,
+				{ showImages: false },
+				undefined,
+				this.tui,
+				this.cwd,
+			);
+			component.markExecutionStarted();
+			if (item.result !== undefined) {
+				const renderedResult =
+					isRecord(item.result) && Array.isArray(item.result.content)
+						? {
+							content: item.result.content as Array<{
+								type: string;
+								text?: string;
+							}>,
+							details: item.result.details,
+							isError: item.isError,
+						}
+						: {
+							content: [
+								{
+									type: "text",
+									text:
+										typeof item.result === "string"
+											? item.result
+											: JSON.stringify(item.result),
+								},
+							],
+							isError: item.isError,
+						};
+				component.updateResult(renderedResult, item.isPartial);
+			}
+			lines.push(...component.render(width));
+		}
+		return lines;
 	}
 
 }

@@ -98,6 +98,10 @@ function fmtDuration(ms: number): string {
 	return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
 }
 
+function isTerminalStatus(status: string): boolean {
+	return status !== "running" && status !== "pending";
+}
+
 function sanitize(text: string): string {
 	return stripAnsi(text)
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
@@ -181,7 +185,7 @@ export async function openSubagentWatch(
 			overlay: true,
 			overlayOptions: {
 				width: "78%",
-				maxHeight: "78%",
+				maxHeight: "94%",
 				anchor: "top-center",
 				minWidth: 72,
 				margin: { top: 1, left: 2, right: 2 },
@@ -605,8 +609,15 @@ export class SubagentWatch implements Component {
 
 	private async refresh(): Promise<void> {
 		if (this.disposed) return;
+		const wasActive = !isTerminalStatus(this.run.status);
 		const reloaded = await this.reload();
+		if (this.disposed) return;
 		if (reloaded !== null) this.run = reloaded;
+		if (wasActive && isTerminalStatus(this.run.status)) {
+			this.dispose();
+			this.done();
+			return;
+		}
 		this.tui.requestRender?.();
 	}
 
@@ -669,8 +680,8 @@ export class SubagentWatch implements Component {
 					? [style(this.theme, "muted", "(no session output available)")]
 					: output.flatMap((line) => wrapTextWithAnsi(line, innerWidth));
 		const viewportHeight = Math.max(
-			6,
-			Math.min(22, Math.floor((process.stdout.rows ?? 30) * 0.58)),
+			8,
+			Math.min(40, Math.floor((process.stdout.rows ?? 30) * 0.76)),
 		);
 		this.viewportHeight = viewportHeight;
 		const maxScroll = Math.max(0, terminalLines.length - viewportHeight);

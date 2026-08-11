@@ -6,7 +6,7 @@ import { rm } from "node:fs/promises";
 
 export async function rmTree(
 	target,
-	{ retries = 12, delayMs = 250 } = {},
+	{ retries = 30, delayMs = 250 } = {},
 ) {
 	for (let attempt = 1; ; attempt += 1) {
 		try {

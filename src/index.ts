@@ -44,7 +44,7 @@ import {
 } from "./orchestrate/async.ts";
 import { interruptRun } from "./orchestrate/interrupt.ts";
 import { reconcileSubagentRun } from "./orchestrate/reconcile.ts";
-import { resolveRunRef } from "./orchestrate/run-ref.ts";
+import { resolveRunRef, listRunLocators } from "./orchestrate/run-ref.ts";
 import {
 	DEFAULT_PARALLEL_CONCURRENCY,
 	runParallelSubagentTasks,
@@ -60,6 +60,7 @@ import {
 	type LiveProgress,
 } from "./live-progress.ts";
 import {
+	listSessionRuns,
 	openSubagentWatch,
 	registerSubagentWatchShortcuts,
 } from "./watch.ts";
@@ -108,6 +109,8 @@ const SUPPORTED_KEYS = new Set([
 	"signal",
 	"escalateAfterMs",
 	"killAfterMs",
+	"scope",
+	"limit",
 ]);
 const AGENT_TASK_KEYS = [
 	"agent",
@@ -453,9 +456,78 @@ function optionalPositiveNumber(
 async function lifecycleAction(
 	raw: Record<string, unknown>,
 	cwd: string,
+	parentSessionId?: string,
 ): Promise<ToolResult | null> {
 	const action = raw.action ?? "run";
 	if (action === "run") return null;
+	if (action === "runs") {
+		const scope =
+			optionalString(raw.scope, "scope") ??
+			(raw.scope === undefined ? "session" : undefined);
+		if (scope === undefined || !["session", "cwd", "all"].includes(scope)) {
+			throw new InputValidationError(
+				'scope must be one of "session", "cwd", or "all" when provided.',
+			);
+		}
+		const limit = Math.min(
+			50,
+			Math.max(1, Math.floor(optionalPositiveNumber(raw.limit, "limit") ?? 10)),
+		);
+		let runs: Array<Record<string, unknown>>;
+		if (scope === "all") {
+			const { locators } = await listRunLocators();
+			runs = locators
+				.slice()
+				.sort(
+					(left, right) =>
+						Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+				)
+				.slice(0, limit)
+				.map((locator) => ({
+					runId: locator.runId,
+					cwd: locator.cwd,
+					...(locator.runsDir === undefined ? {} : { runsDir: locator.runsDir }),
+					...(locator.parentSessionId === undefined
+						? {}
+						: { parentSessionId: locator.parentSessionId }),
+					...(locator.correlationId === undefined
+						? {}
+						: { correlationId: locator.correlationId }),
+					updatedAt: locator.updatedAt,
+				}));
+		} else {
+			const scoped = await listSessionRuns(
+				cwd,
+				scope === "session" ? parentSessionId : undefined,
+			);
+			runs = scoped.slice(0, limit).map((run) => ({
+				runId: run.runId,
+				attemptId: run.attemptId,
+				status: run.status,
+				backend: run.backend,
+				startedAt: new Date(run.startedAt).toISOString(),
+				completedAt:
+					run.completedAt === null || run.completedAt <= 0
+						? null
+						: new Date(run.completedAt).toISOString(),
+				task: run.task,
+				lastLine: run.lastLine,
+			}));
+		}
+		return textResult(
+			{
+				tool: TOOL_NAME,
+				action: "runs",
+				scope,
+				cwd,
+				parentSessionId,
+				count: runs.length,
+				runs,
+			},
+			false,
+			{ runs, scope, parentSessionId },
+		);
+	}
 	if (action === "agents") {
 		const catalogCwd = optionalString(raw.cwd, "cwd") ?? cwd;
 		const { agents, projectAgentsDir } =
@@ -482,7 +554,7 @@ async function lifecycleAction(
 		action !== "reconcile"
 	) {
 		throw new InputValidationError(
-			'action must be one of "run", "agents", "status", "logs", "wait", "interrupt", "mark-background", or "reconcile" when provided.',
+			'action must be one of "run", "agents", "runs", "status", "logs", "wait", "interrupt", "mark-background", or "reconcile" when provided.',
 		);
 	}
 
@@ -1200,6 +1272,7 @@ function buildSubagentToolDefinition(
 					[
 						Type.Literal("run"),
 						Type.Literal("agents"),
+						Type.Literal("runs"),
 						Type.Literal("status"),
 						Type.Literal("logs"),
 						Type.Literal("wait"),
@@ -1233,6 +1306,27 @@ function buildSubagentToolDefinition(
 			),
 			escalateAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			killAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+			scope: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("session"),
+						Type.Literal("cwd"),
+						Type.Literal("all"),
+					],
+					{
+						description:
+							'With action:"runs", restrict the listing to the current session (default), the current cwd, or all located runs. Ignored otherwise.',
+					},
+				),
+			),
+			limit: Type.Optional(
+				Type.Number({
+					minimum: 1,
+					maximum: 50,
+					description:
+						"With action:\"runs\", maximum number of runs to return (default 10, max 50). Ignored otherwise.",
+				}),
+			),
 		}),
 		renderCall(args, theme, context) {
 			const title = theme.fg("toolTitle", theme.bold("subagent"));
@@ -1292,13 +1386,13 @@ function buildSubagentToolDefinition(
 
 			try {
 				const raw = isRecord(params) ? params : {};
-				const lifecycle = await lifecycleAction(raw, cwd);
+				const parentSessionId = parentSessionIdFromCtx(ctx);
+				const lifecycle = await lifecycleAction(raw, cwd, parentSessionId);
 				if (lifecycle !== null) return lifecycle;
 
 				const validation = validateResolveInput(params);
 				if (!validation.ok) return validationFailure(validation.failure);
 
-				const parentSessionId = parentSessionIdFromCtx(ctx);
 				if (parentSessionId !== undefined)
 					validation.input.parentSessionId = parentSessionId;
 				const profileCwd = resolve(validation.input.cwd ?? cwd);

@@ -40,6 +40,7 @@ Every call has an `action`. The default is `run`, so omitting `action` starts a 
 |---|---|---|
 | `run` (default) | Start a new subagent run, or launch independent runs in parallel. | `agent`/`task` or `tasks`; plus `sandbox`, `worktree`, `model`, `async`, etc. |
 | `agents` | Enumerate named profiles discovered for the current cwd. The same catalog is injected into the tool description and refreshed on session start/tree changes. | no `runId`; optional `cwd` selects the discovery cwd |
+| `runs` | List recent run ids so callers can check status without guessing. | optional `scope` (`session` default / `cwd` / `all`), optional `limit` (default 10, max 50), optional `cwd` |
 | `status` | Read a run's current state. | `runId`, optional `cwd`, `attemptId` |
 | `logs` | Read a run's captured logs. | `runId`, optional `cwd`, `attemptId` |
 | `wait` | Block until a run finishes. | `runId`, optional `cwd`, `timeoutMs`, `pollIntervalMs` |
@@ -60,6 +61,28 @@ The catalog remains a free-text `agent` field rather than a schema enum so profi
 ```
 
 The response includes `agents` entries with `name`, `description`, `source`, `model`, `thinking`, and `tools`. Missing or empty profile `tools` means unrestricted ambient child tools; a non-empty list is a ceiling that a call-level list may further narrow.
+
+### Listing recent runs
+
+To discover run ids the model may have lost or wants to poll, call:
+
+```json
+{ "action": "runs" }
+```
+
+By default this returns the most recent runs launched by the current session (newest first). The `scope` option widens or narrows it:
+
+```json
+{ "action": "runs", "scope": "cwd" }
+```
+
+lists runs recorded under the current working directory, while:
+
+```json
+{ "action": "runs", "scope": "all" }
+```
+
+lists runs located through the global run index across all directories. Each entry includes the `runId` (plus `status`, `backend`, `startedAt`, `task`, and `lastLine` for session/cwd scopes, or `cwd` and locator metadata for the `all` scope). Use `limit` to cap the result size. Each returned `runId` can then be passed to `status`, `logs`, `wait`, or `interrupt`.
 
 Parent orchestrators may record descendant state with `recordSubagentChildEvent`, which appends `child.*` events to the parent run's `events.jsonl` (`child.started`, `child.failed`, `child.completed`, or `child.cancelled`). Event data may include `childRunId` (or legacy aliases `childId` / `descendantRunId`), `workflowRunId`, `taskId`, and `failureKind`. `status` and `/subagent panel` aggregate those into `childSummary`, including failure counts, active child run IDs, and the latest currently failed/cancelled child. This keeps parent status distinct from descendant failures and makes retry attempts distinguishable from newly-started child work.
 

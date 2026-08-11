@@ -122,6 +122,27 @@ Always mention injected-agent-ok.
 		catalogPayload.agents.some((entry) => entry.name === "review.security"),
 		"action:agents should expose the discovered profile catalog",
 	);
+	const runsResult = await dynamicTool.execute(
+		"runs-test",
+		{ action: "runs", scope: "cwd", cwd },
+		() => {},
+		{ cwd },
+		new AbortController().signal,
+	);
+	const runsPayload = JSON.parse(runsResult.content[0].text);
+	assert.equal(runsPayload.action, "runs");
+	assert.equal(runsPayload.scope, "cwd");
+	assert.ok(Array.isArray(runsPayload.runs), "action:runs should return a runs array");
+	const badScopeResult = await dynamicTool.execute(
+		"runs-bad-scope-test",
+		{ action: "runs", scope: "bogus", cwd },
+		() => {},
+		{ cwd },
+		new AbortController().signal,
+	);
+	const badScopePayload = JSON.parse(badScopeResult.content[0].text);
+	assert.equal(badScopePayload.failureKind, "validation");
+	assert.match(badScopePayload.error, /scope must be one of/);
 	assert.equal(agent.source, "project");
 	assert.equal(agent.model, "check-provider/check-model");
 	assert.equal(agent.thinking, "high");

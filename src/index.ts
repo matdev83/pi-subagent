@@ -88,7 +88,6 @@ const SUPPORTED_KEYS = new Set([
 	"cwd",
 	"async",
 	"onComplete",
-	"timeoutMs",
 	"model",
 	"tools",
 	"systemPrompt",
@@ -107,8 +106,6 @@ const SUPPORTED_KEYS = new Set([
 	"pollIntervalMs",
 	"reason",
 	"signal",
-	"escalateAfterMs",
-	"killAfterMs",
 	"scope",
 	"limit",
 ]);
@@ -148,7 +145,6 @@ const SUBAGENT_TASK_SCHEMA = Type.Object({
 	sandbox: Type.Optional(SANDBOX_SCHEMA),
 	visible: Type.Optional(Type.Boolean()),
 	cwd: Type.Optional(Type.String({ minLength: 1 })),
-	timeoutMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 	model: Type.Optional(Type.String({ minLength: 1 })),
 	thinking: Type.Optional(
 		Type.Union(THINKING_LEVELS.map((value) => Type.Literal(value))),
@@ -1198,7 +1194,6 @@ function buildSubagentToolDefinition(
 			onComplete: Type.Optional(
 				Type.Union(ON_COMPLETE_ACTIONS.map((value) => Type.Literal(value))),
 			),
-			timeoutMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			model: Type.Optional(
 				Type.String({
 					minLength: 1,
@@ -1304,8 +1299,6 @@ function buildSubagentToolDefinition(
 					Type.Literal("SIGKILL"),
 				]),
 			),
-			escalateAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
-			killAfterMs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			scope: Type.Optional(
 				Type.Union(
 					[

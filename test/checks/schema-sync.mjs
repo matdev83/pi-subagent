@@ -67,11 +67,19 @@ const lifecycleKeys = new Set([
 	"pollIntervalMs",
 	"reason",
 	"signal",
-	"escalateAfterMs",
-	"killAfterMs",
 	"scope",
 	"limit",
 ]);
+
+// Timeout controls must not be exposed to the LLM; runs are expected to finish
+// on their own and the internal wait default is a long 4h deadline.
+for (const hidden of ["timeoutMs", "escalateAfterMs", "killAfterMs"]) {
+	assert.equal(
+		schemaKeys.includes(hidden),
+		false,
+		`LLM-facing tool schema must not expose ${hidden}`,
+	);
+}
 
 for (const key of schemaKeys) {
 	if (lifecycleKeys.has(key)) continue;

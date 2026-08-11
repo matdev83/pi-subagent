@@ -697,7 +697,7 @@ export async function getRunLogs(
 export async function waitForRun(
 	options: WaitForRunOptions,
 ): Promise<WaitForRunResult> {
-	const timeoutMs = options.timeoutMs ?? 60_000;
+	const timeoutMs = options.timeoutMs ?? 4 * 60 * 60 * 1000;
 	const pollIntervalMs = options.pollIntervalMs ?? 500;
 	const deadline = Date.now() + timeoutMs;
 	let snapshot = await getRunStatus(options);

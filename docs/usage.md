@@ -43,8 +43,8 @@ Every call has an `action`. The default is `run`, so omitting `action` starts a 
 | `runs` | List recent run ids so callers can check status without guessing. | optional `scope` (`session` default / `cwd` / `all`), optional `limit` (default 10, max 50), optional `cwd` |
 | `status` | Read a run's current state. | `runId`, optional `cwd`, `attemptId` |
 | `logs` | Read a run's captured logs. | `runId`, optional `cwd`, `attemptId` |
-| `wait` | Block until a run finishes. | `runId`, optional `cwd`, `timeoutMs`, `pollIntervalMs` |
-| `interrupt` | Signal a process-backed run. | `runId`, optional `cwd`, `attemptId`, `signal`, `escalateAfterMs`, `killAfterMs`, `reason` |
+| `wait` | Block until a run finishes (internal default: 4h). | `runId`, optional `cwd`, `pollIntervalMs` |
+| `interrupt` | Signal a process-backed run. | `runId`, optional `cwd`, `attemptId`, `signal`, `reason` |
 | `mark-background` | Mark a run as not needed before the final answer. | `runId`, optional `cwd` |
 | `reconcile` | Re-read durable artifacts and repair stale/orphaned state when possible. | `runId`, optional `cwd` |
 
@@ -126,7 +126,7 @@ const run = await runSubagent({
 
 const status = await getSubagentStatus({ cwd: process.cwd(), runId: run.runId });
 const logs = await getSubagentLogs({ cwd: process.cwd(), runId: run.runId });
-await waitForSubagent({ cwd: process.cwd(), runId: run.runId, timeoutMs: 300000 });
+await waitForSubagent({ cwd: process.cwd(), runId: run.runId, pollIntervalMs: 1000 });
 await interruptSubagent({ cwd: process.cwd(), runId: run.runId, reason: "caller cancelled" });
 await reconcileSubagentRun({ cwd: process.cwd(), runId: run.runId });
 await recordSubagentChildEvent({
@@ -229,7 +229,7 @@ Read logs:
 Wait for completion:
 
 ```json
-{ "action": "wait", "runId": "run_...", "timeoutMs": 300000 }
+{ "action": "wait", "runId": "run_...", "pollIntervalMs": 1000 }
 ```
 
 `wait` reports the wait operation status, not run success. `status:"completed"` with `outcome:"terminal"` means the target run reached any terminal state; inspect `snapshot.status` to distinguish `completed`, `failed`, and `cancelled` runs.
@@ -263,7 +263,7 @@ The locator index is only a pointer for finding runs across cwd boundaries. `run
 | Option | Use |
 |---|---|
 | `cwd` | Run from a specific project directory. Existing-run actions accept `cwd` to force a registry location; if omitted, recent runs can be found by global locator and older runs fall back to the current cwd. |
-| `timeoutMs` | Limit worker execution time for `run`; limit polling duration for `action: "wait"`. Omit it for no runtime kill deadline; `wait` alone defaults to 60s polling. |
+The `subagent` tool deliberately does not expose a `timeoutMs` parameter. Runs are not time-limited by the tool; subagents are expected to finish on their own, and `action:"wait"` polls internally with a 4-hour default deadline. Orchestrators using the code API can still pass `timeoutMs` explicitly on runs and waits if they need a shorter SLA.
 | `visible` | Use a visible worker (`visible: true`): tmux on Linux/macOS, or pair with `backend: "herdr"` on Windows. |
 | `concurrency` | Cap parallel run fan-out. |
 | `failFast` | For synchronous parallel runs, stop scheduling new siblings after the first failed result. |
@@ -450,9 +450,9 @@ These options may also be set per task in `tasks[]`.
 
 Timeout notes:
 
-- `timeoutMs` on a run is the worker execution deadline. If omitted, pi-subagent does not impose a run timeout.
-- `action:"wait"` uses `timeoutMs` as a polling deadline and defaults to 60 seconds. Its `status:"completed"` means polling reached a terminal run; check `snapshot.status` for run success/failure/cancellation.
-- `onComplete:"notify"` uses an internal completion monitor with a long safety window (up to 24h when no `timeoutMs` is set); it does not kill the worker. The monitor polls in the parent process and has no cancellation handle, so long-lived SDK embeddings should prefer `onComplete:"detach"` plus explicit `action:"status"`/`"wait"` polling. Orchestrators that need a 4h or other SLA should pass `timeoutMs` explicitly on the run.
+- The tool does not expose `timeoutMs`; runs are not killed by a default deadline. Use `interrupt` explicitly if a run must be stopped.
+- `action:"wait"` polls until the run is terminal, with an internal 4-hour default deadline. Its `status:"completed"` means polling reached a terminal run; check `snapshot.status` for run success/failure/cancellation.
+- `onComplete:"notify"` uses an internal completion monitor with a long safety window (up to 24h); it does not kill the worker. The monitor polls in the parent process and has no cancellation handle, so long-lived SDK embeddings should prefer `onComplete:"detach"` plus explicit `action:"status"`/`"wait"` polling. Orchestrators that need a shorter SLA can pass `timeoutMs` through the code API (`runSubagent`/`waitForSubagent`).
 
 ## Artifacts
 

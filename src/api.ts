@@ -1,5 +1,9 @@
 import { resolve } from "node:path";
-import { loadAgentByName, type AgentDefinition } from "./agents.ts";
+import {
+	applyAgentRuntimeDefaults,
+	loadAgentByName,
+	type AgentDefinition,
+} from "./agents.ts";
 import {
 	appendRunEvent,
 	type ResultEnvelope,
@@ -196,12 +200,12 @@ function validateRunnableInput(
 	}
 }
 
-function validateRunOptions(options: RunSubagentOptions): {
+async function validateRunOptions(options: RunSubagentOptions): Promise<{
 	input: ResolveInput;
 	cwd: string;
 	backend: ResolvedBackend;
 	signal?: AbortSignal;
-} {
+}> {
 	const { signal, ...rawInput } = options;
 	const validation = validateResolveInput(rawInput);
 	if (!validation.ok) {
@@ -211,20 +215,21 @@ function validateRunOptions(options: RunSubagentOptions): {
 		);
 	}
 
-	const resolved = resolveBackend(validation.input);
+	const cwd = resolve(validation.input.cwd ?? process.cwd());
+	const profiled = await applyAgentRuntimeDefaults(validation.input, cwd);
+	const resolved = resolveBackend(profiled.input);
 	if (resolved.status === "failed") {
 		throw new SubagentValidationError(resolved.error, resolved.backend);
 	}
 
-	validateRunnableInput(validation.input, resolved.backend);
-	const cwd = resolve(validation.input.cwd ?? process.cwd());
-	return { input: validation.input, cwd, backend: resolved.backend, signal };
+	validateRunnableInput(profiled.input, resolved.backend);
+	return { input: profiled.input, cwd, backend: resolved.backend, signal };
 }
 
 export async function runSubagent(
 	options: RunSubagentOptions,
 ): Promise<RunSubagentResult> {
-	const { input, cwd, backend, signal } = validateRunOptions(options);
+	const { input, cwd, backend, signal } = await validateRunOptions(options);
 	await assertProjectAgentApproval(input, cwd);
 
 	try {

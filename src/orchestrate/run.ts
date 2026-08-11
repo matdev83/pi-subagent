@@ -1,5 +1,8 @@
 import { resolve } from "node:path";
-import { loadAgentByName, type AgentDefinition } from "../agents.ts";
+import {
+	applyAgentRuntimeDefaults,
+	type AgentDefinition,
+} from "../agents.ts";
 import {
 	appendRunEvent,
 	beginRunRecord,
@@ -213,21 +216,20 @@ async function writeParallelErrorResult(options: {
 export async function runSubagentTask(
 	options: RunSubagentTaskOptions,
 ): Promise<ResultEnvelope> {
-	const input = options.input;
+	let input = options.input;
+	const baseCwd = resolve(input.cwd ?? options.cwd);
+	const profiled = await applyAgentRuntimeDefaults(input, baseCwd);
+	input = profiled.input;
 	const resolved = resolveBackend(input);
 	if (resolved.status === "failed") throw new Error(resolved.error);
 
 	const backend = resolved.backend;
 	const runId = options.runId ?? createRunId();
 	const attemptId = options.attemptId ?? createAttemptId();
-	const baseCwd = resolve(input.cwd ?? options.cwd);
 	const startedAt = new Date();
 	const runRef = { cwd: baseCwd, runId, runsDir: input.runsDir };
 	const requestedAgent = input.agent ?? `${backend}-worker`;
-	const shouldLoadAgent = input.agent !== undefined;
-	const agentDefinition = shouldLoadAgent
-		? await loadAgentByName(input.agent!, baseCwd, input.agentScope)
-		: undefined;
+	const agentDefinition = profiled.agentDefinition;
 	const effectiveTools = resolveEffectiveTools(input, agentDefinition);
 
 	await beginRunRecord({

@@ -27,6 +27,7 @@ export interface CatalogEntry {
 	description: string | null;
 	source: AgentSource;
 	model: string | null;
+	backend: AgentDefinition["backend"] | null;
 	thinking: ThinkingLevel | null;
 	tools: string[] | null;
 }
@@ -50,6 +51,7 @@ export function catalogEntries(agents: AgentDefinition[]): CatalogEntry[] {
 				: oneLine(agent.description, MAX_ENTRY_DESCRIPTION),
 		source: agent.source,
 		model: agent.model ?? null,
+		backend: agent.backend ?? null,
 		thinking: agent.thinking ?? null,
 		tools:
 			agent.tools !== undefined && agent.tools.length > 0
@@ -78,6 +80,7 @@ export function formatAgentCatalogText(agents: AgentDefinition[]): string {
 			parts.push(`— ${oneLine(agent.description, MAX_ENTRY_DESCRIPTION)}`);
 		}
 		const meta: string[] = [];
+		if (agent.backend !== undefined) meta.push(`backend ${agent.backend}`);
 		if (agent.model !== undefined) meta.push(`model ${agent.model}`);
 		if (agent.thinking !== undefined) meta.push(`thinking ${agent.thinking}`);
 		if (agent.tools !== undefined && agent.tools.length > 0)

@@ -51,6 +51,7 @@ SHOULD_NOT_LOAD_FROM_SHARED_PARENT
 		`---
 name: security-reviewer
 description: Security specialist for check coverage
+backend: headless
 model: check-provider/check-model
 thinking: high
 tools:
@@ -66,10 +67,12 @@ Always mention injected-agent-ok.
 	const agent = await loadAgentByName("review.security", cwd, "project");
 	assert.ok(agent, "project agent should load by dotted path alias");
 	assert.equal(agent.name, "security-reviewer");
+	assert.equal(agent.backend, "headless");
 
 	const catalog = formatAgentCatalogText([agent]);
 	assert.match(catalog, /review\.security/);
 	assert.match(catalog, /Security specialist for check coverage/);
+	assert.match(catalog, /backend headless/);
 	assert.match(catalog, /model check-provider\/check-model/);
 	assert.match(catalog, /tools: read,grep/);
 	assert.deepEqual(catalogEntries([agent]), [
@@ -78,6 +81,7 @@ Always mention injected-agent-ok.
 			description: "Security specialist for check coverage",
 			source: "project",
 			model: "check-provider/check-model",
+			backend: "headless",
 			thinking: "high",
 			tools: ["read", "grep"],
 		},

@@ -10,8 +10,11 @@ import {
 	sep,
 } from "node:path";
 import {
+	BACKENDS,
 	THINKING_LEVELS,
 	type AgentScope,
+	type Backend,
+	type ResolveInput,
 	type ThinkingLevel,
 } from "./core/constants.ts";
 
@@ -27,6 +30,7 @@ export interface AgentDefinition {
 	body: string;
 	frontmatter: Record<string, unknown>;
 	model?: string;
+	backend?: Backend;
 	thinking?: ThinkingLevel;
 	tools?: string[];
 	systemPromptMode?: "append" | "replace" | string;
@@ -73,6 +77,13 @@ function thinkingValue(value: unknown): ThinkingLevel | undefined {
 	return typeof value === "string" &&
 		(THINKING_LEVELS as readonly string[]).includes(value)
 		? (value as ThinkingLevel)
+		: undefined;
+}
+
+function backendValue(value: unknown): Backend | undefined {
+	return typeof value === "string" &&
+		(BACKENDS as readonly string[]).includes(value)
+		? (value as Backend)
 		: undefined;
 }
 
@@ -298,9 +309,26 @@ export function parseAgentMarkdown(
 		body,
 		frontmatter,
 		model: stringValue(frontmatter.model),
+		backend: backendValue(frontmatter.backend),
 		thinking: thinkingValue(frontmatter.thinking),
 		tools: toolsValue(frontmatter.tools),
 		systemPromptMode: stringValue(frontmatter.systemPromptMode),
+	};
+}
+
+export async function applyAgentRuntimeDefaults(
+	input: ResolveInput,
+	cwd: string,
+): Promise<{ input: ResolveInput; agentDefinition?: AgentDefinition }> {
+	if (input.agent === undefined) return { input };
+	const agentDefinition = await loadAgentByName(input.agent, cwd, input.agentScope);
+	if (agentDefinition === undefined) return { input };
+	return {
+		input: {
+			...input,
+			backend: input.backend ?? agentDefinition.backend,
+		},
+		agentDefinition,
 	};
 }
 

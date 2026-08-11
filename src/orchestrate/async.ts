@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { applyAgentRuntimeDefaults } from "../agents.ts";
 import {
 	appendRunEvent,
 	beginRunRecord,
@@ -155,15 +156,19 @@ export async function startAsyncParallelSubagentRuns(
 			);
 	}
 
-	const taskPlans = input.tasks.map((task, index) => {
-		const taskInput = mergeTaskInput(input, task);
-		const resolved = resolveBackend(taskInput);
-		if (resolved.status === "failed")
-			throw new SubagentToolAuthorityError(
-				`parallel tasks[${index}] backend resolution failed: ${resolved.error}`,
-			);
-		return { index, taskInput, backend: resolved.backend };
-	});
+	const taskPlans = await Promise.all(
+		input.tasks.map(async (task, index) => {
+			const taskInput = mergeTaskInput(input, task);
+			const taskCwd = resolve(taskInput.cwd ?? cwd);
+			const profiled = await applyAgentRuntimeDefaults(taskInput, taskCwd);
+			const resolved = resolveBackend(profiled.input);
+			if (resolved.status === "failed")
+				throw new SubagentToolAuthorityError(
+					`parallel tasks[${index}] backend resolution failed: ${resolved.error}`,
+				);
+			return { index, taskInput: profiled.input, backend: resolved.backend };
+		}),
+	);
 	const concurrency = Math.min(parallelConcurrency(input), taskPlans.length);
 	const results: ResultEnvelope[] = new Array(taskPlans.length);
 	let nextIndex = 0;

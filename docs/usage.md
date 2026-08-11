@@ -366,13 +366,13 @@ Child sessions load Pi's normal ambient extensions and skills by default, so pac
 
 ## Agent definitions
 
-When `agent` names a Pi agent markdown file, the engine injects that agent's body as system prompt context and inherits supported frontmatter such as `model`, `thinking`, and `tools`.
+When `agent` names a Pi agent markdown file, the engine injects that agent's body as system prompt context and inherits supported frontmatter such as `backend`, `model`, `thinking`, and `tools`. Call-level values take precedence over profile defaults. Use `backend: headless` for profiles whose model provider is registered by a Pi extension (for example Cursor ACP), because process-backed children load ambient extensions before model resolution.
 
 Agent files inherit the child session's complete ambient tool surface when `tools` is omitted or empty. Add a non-empty `tools` list only when the profile should be restricted. If both the profile and call provide non-empty `tools` lists, the effective set is their intersection, so either side may narrow access without expanding the profile's declared set.
 
 For agentless model-backed runs, call-level `tools` can set the full tool allowlist. Use `tools: []` to run an agentless task with no tools.
 
-`systemPrompt` is a full override for orchestrators that compile prompts themselves. When provided, it is passed as the final system prompt and no agent prompt is appended. If `agent` is also provided, the agent file is still loaded for approval and frontmatter policy (`tools`, `model`, `thinking`), but its body is not appended to the prompt.
+`systemPrompt` is a full override for orchestrators that compile prompts themselves. When provided, it is passed as the final system prompt and no agent prompt is appended. If `agent` is also provided, the agent file is still loaded for approval and frontmatter policy (`backend`, `tools`, `model`, `thinking`), but its body is not appended to the prompt.
 
 Use `roleContext` for extra worker role instructions without creating a reusable agent file:
 

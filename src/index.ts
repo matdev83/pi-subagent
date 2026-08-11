@@ -5,6 +5,7 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
+	applyAgentRuntimeDefaults,
 	loadAgentByName,
 	type AgentDefinition,
 } from "./agents.ts";
@@ -1300,6 +1301,12 @@ function buildSubagentToolDefinition(
 				const parentSessionId = parentSessionIdFromCtx(ctx);
 				if (parentSessionId !== undefined)
 					validation.input.parentSessionId = parentSessionId;
+				const profileCwd = resolve(validation.input.cwd ?? cwd);
+				const profiled = await applyAgentRuntimeDefaults(
+					validation.input,
+					profileCwd,
+				);
+				Object.assign(validation.input, profiled.input);
 
 				const resolved = resolveBackend(validation.input);
 				if (resolved.status === "failed") return validationFailure(resolved);

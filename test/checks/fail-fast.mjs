@@ -45,7 +45,10 @@ try {
 		{
 			...common,
 			concurrency: 2,
-			tasks: [{ task: "bad A" }, { task: "bad B" }],
+			tasks: [
+				{ backend: "bogus", task: "bad A" },
+				{ backend: "bogus", task: "bad B" },
+			],
 		},
 		cwd,
 	);
@@ -91,7 +94,10 @@ try {
 			...common,
 			concurrency: 1,
 			failFast: true,
-			tasks: [{ task: "bad first" }, { task: "must be skipped" }],
+			tasks: [
+				{ backend: "bogus", task: "bad first" },
+				{ backend: "bogus", task: "must be skipped" },
+			],
 		},
 		cwd,
 	);
@@ -107,7 +113,10 @@ try {
 			...common,
 			concurrency: 1,
 			cancelSiblingsOnFailure: true,
-			tasks: [{ task: "bad first" }, { task: "must be skipped" }],
+			tasks: [
+				{ backend: "bogus", task: "bad first" },
+				{ backend: "bogus", task: "must be skipped" },
+			],
 		},
 		cwd,
 	);

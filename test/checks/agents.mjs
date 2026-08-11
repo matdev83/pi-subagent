@@ -7,6 +7,18 @@ import { buildAgentSystemPrompt, loadAgentByName } from "../../src/agents.ts";
 import { buildPiArgv } from "../../src/runners/headless-model.ts";
 import { resolveEffectiveTools } from "../../src/orchestrate/run.ts";
 import { runSubagent } from "../../api.mjs";
+import { createJiti } from "jiti";
+import {
+	catalogEntries,
+	formatAgentCatalogText,
+} from "../../src/catalog.ts";
+
+const jiti = createJiti(import.meta.url, {
+	interopDefault: true,
+	moduleCache: false,
+});
+const extensionModule = await jiti.import("../../src/index.ts");
+const registerSubagentEngine = extensionModule.default ?? extensionModule;
 
 const tempRoot = await mkdtemp(join(tmpdir(), "pi-subagent-agents-"));
 try {
@@ -54,6 +66,58 @@ Always mention injected-agent-ok.
 	const agent = await loadAgentByName("review.security", cwd, "project");
 	assert.ok(agent, "project agent should load by dotted path alias");
 	assert.equal(agent.name, "security-reviewer");
+
+	const catalog = formatAgentCatalogText([agent]);
+	assert.match(catalog, /review\.security/);
+	assert.match(catalog, /Security specialist for check coverage/);
+	assert.match(catalog, /model check-provider\/check-model/);
+	assert.match(catalog, /tools: read,grep/);
+	assert.deepEqual(catalogEntries([agent]), [
+		{
+			name: "review.security",
+			description: "Security specialist for check coverage",
+			source: "project",
+			model: "check-provider/check-model",
+			thinking: "high",
+			tools: ["read", "grep"],
+		},
+	]);
+	assert.match(
+		formatAgentCatalogText([]),
+		/No named subagent profiles are configured/,
+	);
+
+	const registeredTools = [];
+	const handlers = new Map();
+	registerSubagentEngine({
+		registerTool(tool) {
+			registeredTools.push(tool);
+		},
+		on(name, handler) {
+			handlers.set(name, handler);
+		},
+	});
+	const sessionStart = handlers.get("session_start");
+	assert.equal(typeof sessionStart, "function");
+	await sessionStart({}, { cwd });
+	const dynamicTool = registeredTools.at(-1);
+	assert.ok(dynamicTool, "catalog refresh should re-register the tool");
+	assert.match(dynamicTool.description, /review\.security/);
+	assert.match(dynamicTool.description, /Security specialist for check coverage/);
+	const catalogResult = await dynamicTool.execute(
+		"catalog-test",
+		{ action: "agents", cwd },
+		() => {},
+		{ cwd },
+		new AbortController().signal,
+	);
+	const catalogPayload = JSON.parse(catalogResult.content[0].text);
+	assert.equal(catalogPayload.action, "agents");
+	assert.equal(catalogPayload.cwd, cwd);
+	assert.ok(
+		catalogPayload.agents.some((entry) => entry.name === "review.security"),
+		"action:agents should expose the discovered profile catalog",
+	);
 	assert.equal(agent.source, "project");
 	assert.equal(agent.model, "check-provider/check-model");
 	assert.equal(agent.thinking, "high");
@@ -138,6 +202,7 @@ OPEN_AGENT_PROMPT_MARKER
 	const openAgent = await loadAgentByName("open", cwd, "project");
 	assert.ok(openAgent, "agent without tools should load");
 	assert.equal(openAgent.tools, undefined);
+	assert.equal(catalogEntries([openAgent])[0].tools, null);
 	const openArgv = buildPiArgv({
 		agent: "open",
 		task: "check default tools",

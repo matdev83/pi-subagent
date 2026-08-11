@@ -20,19 +20,26 @@ Tool name:
 subagent
 ```
 
-TUI command:
+TUI commands:
 
 ```text
+/subagent enable
+/subagent disable
 /subagent panel
+/subagent watch [1-9]
 ```
+
+`/subagent enable` and `/subagent disable` control whether the `subagent` tool is active for the current Pi session. Disabling removes the tool from the active LLM tool set and rebuilds the system prompt, so the model cannot call it or see its tool schema. The command itself remains available so the feature can be re-enabled later. The setting is session-local and defaults to enabled.
 
 ## Actions
 
+The slash-command toggle is separate from lifecycle actions: use `/subagent enable` or `/subagent disable` for LLM exposure, and `action: "agents"` when a caller needs the discovered profile catalog.
 Every call has an `action`. The default is `run`, so omitting `action` starts a new subagent.
 
 | `action` | Purpose | Key parameters |
 |---|---|---|
 | `run` (default) | Start a new subagent run, or launch independent runs in parallel. | `agent`/`task` or `tasks`; plus `sandbox`, `worktree`, `model`, `async`, etc. |
+| `agents` | Enumerate named profiles discovered for the current cwd. The same catalog is injected into the tool description and refreshed on session start/tree changes. | no `runId`; optional `cwd` selects the discovery cwd |
 | `status` | Read a run's current state. | `runId`, optional `cwd`, `attemptId` |
 | `logs` | Read a run's captured logs. | `runId`, optional `cwd`, `attemptId` |
 | `wait` | Block until a run finishes. | `runId`, optional `cwd`, `timeoutMs`, `pollIntervalMs` |
@@ -40,7 +47,19 @@ Every call has an `action`. The default is `run`, so omitting `action` starts a 
 | `mark-background` | Mark a run as not needed before the final answer. | `runId`, optional `cwd` |
 | `reconcile` | Re-read durable artifacts and repair stale/orphaned state when possible. | `runId`, optional `cwd` |
 
-State is file-based under `.pi/agent/runs/<run-id>/`. `status`/`logs`/`wait` read those files; `interrupt` sends a real OS signal; `mark-background` updates run metadata; `reconcile` repairs local metadata from durable attempt artifacts without relaunching work. Recent runs also write a global locator pointer, so existing-run actions can often resolve a `runId` even when `cwd` is omitted or the run was launched from another cwd.
+State is file-based under `.pi/agent/runs/<run-id>`. `status`/`logs`/`wait` read those files; `interrupt` sends a real OS signal; `mark-background` updates run metadata; `reconcile` repairs local metadata from durable attempt artifacts without relaunching work. Recent runs also write a global locator pointer, so existing-run actions can often resolve a `runId` even when `cwd` is omitted or the run was launched from another cwd.
+
+### Automatic agent discovery
+
+At registration and on `session_start`/`session_tree`, the extension discovers global profiles from `~/.pi/agent/agents/**/*.md` and project profiles from the repository-local `.pi/agents/**/*.md`. Each profile's `name`/dotted path and frontmatter `description` are automatically included in the `subagent` tool description, along with useful model/thinking/tool metadata. The tool prompt also tells the parent model to choose a listed profile rather than inventing names.
+
+The catalog remains a free-text `agent` field rather than a schema enum so profiles can be added or removed during a session without making the tool schema stale. To retrieve the full structured catalog programmatically, call:
+
+```json
+{ "action": "agents" }
+```
+
+The response includes `agents` entries with `name`, `description`, `source`, `model`, `thinking`, and `tools`. Missing or empty profile `tools` means unrestricted ambient child tools; a non-empty list is a ceiling that a call-level list may further narrow.
 
 Parent orchestrators may record descendant state with `recordSubagentChildEvent`, which appends `child.*` events to the parent run's `events.jsonl` (`child.started`, `child.failed`, `child.completed`, or `child.cancelled`). Event data may include `childRunId` (or legacy aliases `childId` / `descendantRunId`), `workflowRunId`, `taskId`, and `failureKind`. `status` and `/subagent panel` aggregate those into `childSummary`, including failure counts, active child run IDs, and the latest currently failed/cancelled child. This keeps parent status distinct from descendant failures and makes retry attempts distinguishable from newly-started child work.
 

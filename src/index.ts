@@ -1,7 +1,18 @@
 import { resolve } from "node:path";
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadAgentByName, type AgentDefinition } from "./agents.ts";
+import type {
+	ExtensionAPI,
+	ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import {
+	loadAgentByName,
+	type AgentDefinition,
+} from "./agents.ts";
+import {
+	catalogEntries,
+	discoverSubagentCatalog,
+	formatAgentCatalogText,
+} from "./catalog.ts";
 import {
 	appendRunEvent,
 	createAttemptArtifactStore,
@@ -444,6 +455,23 @@ async function lifecycleAction(
 ): Promise<ToolResult | null> {
 	const action = raw.action ?? "run";
 	if (action === "run") return null;
+	if (action === "agents") {
+		const catalogCwd = optionalString(raw.cwd, "cwd") ?? cwd;
+		const { agents, projectAgentsDir } =
+			await discoverSubagentCatalog(catalogCwd);
+		const entries = catalogEntries(agents);
+		return textResult(
+			{
+				tool: TOOL_NAME,
+				action: "agents",
+				projectAgentsDir,
+				cwd: catalogCwd,
+				agents: entries,
+			},
+			false,
+			{ agents: entries, projectAgentsDir, cwd: catalogCwd },
+		);
+	}
 	if (
 		action !== "status" &&
 		action !== "logs" &&
@@ -453,7 +481,7 @@ async function lifecycleAction(
 		action !== "reconcile"
 	) {
 		throw new InputValidationError(
-			'action must be one of "run", "status", "logs", "wait", "interrupt", "mark-background", or "reconcile" when provided.',
+			'action must be one of "run", "agents", "status", "logs", "wait", "interrupt", "mark-background", or "reconcile" when provided.',
 		);
 	}
 
@@ -844,13 +872,31 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 		pi.on("session_shutdown", () => {
 			resetProgress();
 		});
+		pi.on("session_start", async (_event, ctx) => {
+			setSubagentToolEnabled(pi, isSubagentToolEnabled(pi, ctx), ctx);
+			await refreshSubagentCatalog(pi, ctx.cwd);
+		});
+		pi.on("session_tree", async (_event, ctx) => {
+			setSubagentToolEnabled(pi, isSubagentToolEnabled(pi, ctx), ctx);
+			await refreshSubagentCatalog(pi, ctx.cwd);
+		});
 	}
 	if (typeof pi.registerCommand === "function") {
 		pi.registerCommand("subagent", {
 			description:
-				"Subagent utilities. Use `/subagent panel` to open the live status panel.",
+				"Subagent utilities. Use `/subagent enable|disable` to control LLM exposure, `/subagent panel` for status, or `/subagent watch [1-9]` for a live run.",
 			getArgumentCompletions(prefix) {
 				const items = [
+					{
+						value: "enable",
+						label: "enable",
+						description: "Expose the subagent tool to the LLM for this session",
+					},
+					{
+						value: "disable",
+						label: "disable",
+						description: "Hide the subagent tool from the LLM for this session",
+					},
 					{
 						value: "panel",
 						label: "panel",
@@ -872,6 +918,17 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 				const normalizedArgs = commandArgs
 					.replace(/^\/?subagent\b\s*/, "")
 					.trim();
+				if (normalizedArgs === "enable" || normalizedArgs === "disable") {
+					const enabled = normalizedArgs === "enable";
+					setSubagentToolEnabled(pi, enabled, ctx);
+					ctx.ui.notify?.(
+						enabled
+							? "Subagent tool enabled for this session."
+							: "Subagent tool disabled for this session; it is hidden from the LLM.",
+						"info",
+					);
+					return;
+				}
 				if (normalizedArgs === "panel") {
 					await showSubagentPanel(ctx);
 					return;
@@ -882,18 +939,126 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 					return;
 				}
 				ctx.ui.notify?.(
-					"Usage: /subagent panel or /subagent watch [1-9]",
+					"Usage: /subagent enable|disable|panel or /subagent watch [1-9]",
 					"warning",
 				);
 			},
 		});
 	}
 
-	pi.registerTool({
+	pi.registerTool(buildSubagentToolDefinition(DEFAULT_SUBAGENT_DESCRIPTION, []));
+	void refreshSubagentCatalog(pi, process.cwd());
+}
+
+const DEFAULT_SUBAGENT_DESCRIPTION = [
+	"Subagent engine. Executes headless/tmux/herdr/inline workers; supports workspace:auto/worktree isolation, bounded parallel fanout, async lifecycle lookup, mark-background, reconcile, and conservative interrupt. Workspaces default to shared; set worktree:true for parallel tasks that mutate files.",
+	"",
+	"{CATALOG}",
+].join("\n");
+
+type SubagentToolDefinition = ToolDefinition<any, any, any>;
+
+/**
+ * Refresh the LLM-facing subagent catalog for a working directory. Discovers
+ * global + project agent profiles and re-registers the tool so its description
+ * and prompt guidelines list every available profile. No-op when unchanged.
+ */
+interface CatalogRefreshState {
+	lastDescription: string;
+	requestId: number;
+	enabledBySession: Map<string, boolean>;
+}
+
+const catalogRefreshStates = new WeakMap<object, CatalogRefreshState>();
+
+function catalogStateFor(pi: ExtensionAPI): CatalogRefreshState {
+	const existing = catalogRefreshStates.get(pi as object);
+	if (existing !== undefined) return existing;
+	const created: CatalogRefreshState = {
+		lastDescription: "",
+		requestId: 0,
+		enabledBySession: new Map(),
+	};
+	catalogRefreshStates.set(pi as object, created);
+	return created;
+}
+
+function sessionKey(ctx: unknown): string {
+	if (isRecord(ctx)) {
+		const sessionManager = ctx.sessionManager;
+		if (isRecord(sessionManager) && typeof sessionManager.getSessionId === "function") {
+			try {
+				const id = sessionManager.getSessionId();
+				if (typeof id === "string" && id.length > 0) return id;
+			} catch {
+				// Fall back to the extension instance when session metadata is unavailable.
+			}
+		}
+	}
+	return "__current__";
+}
+
+function setSubagentToolEnabled(
+	pi: ExtensionAPI,
+	enabled: boolean,
+	ctx: unknown,
+): void {
+	const state = catalogStateFor(pi);
+	state.enabledBySession.set(sessionKey(ctx), enabled);
+	if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
+		return;
+	}
+	const active = pi.getActiveTools();
+	const next = enabled
+		? active.includes(TOOL_NAME)
+			? active
+			: [...active, TOOL_NAME]
+		: active.filter((name) => name !== TOOL_NAME);
+	if (next.length !== active.length || next.some((name, index) => name !== active[index])) {
+		pi.setActiveTools(next);
+	}
+}
+
+function isSubagentToolEnabled(pi: ExtensionAPI, ctx: unknown): boolean {
+	return catalogStateFor(pi).enabledBySession.get(sessionKey(ctx)) ?? true;
+}
+
+async function refreshSubagentCatalog(
+	pi: ExtensionAPI,
+	cwd: string,
+): Promise<void> {
+	const state = catalogStateFor(pi);
+	const requestId = ++state.requestId;
+	try {
+		const { agents } = await discoverSubagentCatalog(cwd);
+		if (requestId !== state.requestId) return;
+		const description = DEFAULT_SUBAGENT_DESCRIPTION.replace(
+			"{CATALOG}",
+			formatAgentCatalogText(agents),
+		);
+		if (description === state.lastDescription) return;
+		const guidelines =
+			agents.length === 0
+				? []
+				: [
+						"When delegating to a subagent, prefer a named profile from the subagent tool description whose purpose matches the task. Never invent profile names. Omit agent to run an unnamed general-purpose worker.",
+					];
+		pi.registerTool(buildSubagentToolDefinition(description, guidelines));
+		state.lastDescription = description;
+	} catch {
+		// Catalog refresh must never break session startup.
+	}
+}
+
+function buildSubagentToolDefinition(
+	description: string,
+	promptGuidelines: string[],
+): SubagentToolDefinition {
+	return {
 		name: TOOL_NAME,
 		label: "Subagent",
-		description:
-			"Subagent engine. Executes headless/tmux/herdr/inline workers; supports workspace:auto/worktree isolation, bounded parallel fanout, async lifecycle lookup, mark-background, reconcile, and conservative interrupt. Workspaces default to shared; set worktree:true for parallel tasks that mutate files.",
+		description,
+		promptGuidelines,
 		parameters: Type.Object({
 			backend: Type.Optional(
 				Type.Union(BACKENDS.map((value) => Type.Literal(value))),
@@ -1033,6 +1198,7 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 				Type.Union(
 					[
 						Type.Literal("run"),
+						Type.Literal("agents"),
 						Type.Literal("status"),
 						Type.Literal("logs"),
 						Type.Literal("wait"),
@@ -1043,7 +1209,7 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 					{
 						default: "run",
 						description:
-							'What to do. Default "run" starts a new subagent. status/logs/wait/interrupt/mark-background/reconcile operate on an existing runId.',
+							'What to do. Default "run" starts a new subagent. agents lists discovered profiles. status/logs/wait/interrupt/mark-background/reconcile operate on an existing runId.',
 					},
 				),
 			),
@@ -1076,7 +1242,9 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 			const base = `${title} ${theme.fg("muted", rest)}`;
 			if (context?.toolCallId && typeof context.invalidate === "function") {
 				const requestedCwd =
-					typeof args.cwd === "string" && args.cwd.length > 0
+					isRecord(args) &&
+					typeof args.cwd === "string" &&
+					args.cwd.length > 0
 						? args.cwd
 						: context.cwd;
 				attachProgress(context.toolCallId, requestedCwd, () =>
@@ -1258,5 +1426,5 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 				);
 			}
 		},
-	});
+	};
 }

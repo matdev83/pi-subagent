@@ -197,12 +197,20 @@ async function main() {
 	const { listRunLocators } = await loadRunRefModule();
 	let registeredTool;
 	let registeredCommand;
+	let activeTools = ["read", "bash", "edit", "write", "subagent"];
 	register({
 		registerTool(tool) {
 			registeredTool = tool;
 		},
 		registerCommand(name, command) {
 			registeredCommand = { name, ...command };
+		},
+		on() {},
+		getActiveTools() {
+			return activeTools;
+		},
+		setActiveTools(names) {
+			activeTools = names;
 		},
 	});
 
@@ -291,6 +299,13 @@ async function main() {
 		"panel",
 	);
 	assert.equal(registeredCommand.getArgumentCompletions("zzz"), null);
+	assert.equal(registeredCommand.getArgumentCompletions("en")?.[0]?.value, "enable");
+	assert.equal(registeredCommand.getArgumentCompletions("di")?.[0]?.value, "disable");
+	const commandCtx = { cwd: process.cwd(), ui: { notify() {} } };
+	await registeredCommand.handler("disable", commandCtx);
+	assert.equal(activeTools.includes("subagent"), false);
+	await registeredCommand.handler("enable", commandCtx);
+	assert.equal(activeTools.includes("subagent"), true);
 
 	const tempRoot = await mkdtemp(join(tmpdir(), "pi-subagent-panel-"));
 	const oldIndexDir = process.env.PI_SUBAGENT_RUN_INDEX_DIR;
@@ -354,7 +369,7 @@ async function main() {
 			},
 		});
 		assert.ok(
-			notifications.some((item) => item.message.includes("/subagent panel")),
+			notifications.some((item) => item.message.includes("/subagent enable")),
 			"wrong args should show usage",
 		);
 

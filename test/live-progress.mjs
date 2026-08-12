@@ -25,22 +25,34 @@ const attemptDir = join(runDir, "attempts", attemptId);
 mkdirSync(attemptDir, { recursive: true });
 
 const startedAt = new Date(Date.now() - 3000).toISOString();
-function writeRun(status, completedAt = null, updatedAt = new Date().toISOString()) {
+function writeRunRecord(
+	targetRunId,
+	targetAttemptId,
+	status,
+	completedAt = null,
+	updatedAt = new Date().toISOString(),
+	targetStartedAt = startedAt,
+) {
+	const targetRunDir = join(runsDir, targetRunId);
+	mkdirSync(join(targetRunDir, "attempts", targetAttemptId), { recursive: true });
 	writeFileSync(
-		join(runDir, "run.json"),
+		join(targetRunDir, "run.json"),
 		JSON.stringify({
 			schemaVersion: 2,
-			runId,
+			runId: targetRunId,
 			mode: "single",
 			status,
 			backend: "herdr",
-			startedAt,
+			startedAt: targetStartedAt,
 			updatedAt,
 			completedAt,
-			latestAttemptId: attemptId,
+			latestAttemptId: targetAttemptId,
 			attempts: [],
 		}),
 	);
+}
+function writeRun(status, completedAt = null, updatedAt = new Date().toISOString()) {
+	writeRunRecord(runId, attemptId, status, completedAt, updatedAt);
 }
 writeRun("running");
 writeFileSync(
@@ -84,6 +96,83 @@ const runningLabel = lp.formatProgress({
 	lastLine: "running the tests",
 });
 check("running label includes live + line", runningLabel.includes("live") && runningLabel.includes("running the tests"), runningLabel);
+
+// Explicit binding must continue to work even when the run is older than the
+// bounded recency scan and must not confuse it with neighboring runs.
+const boundRunId = "run_bound_exact";
+const boundAttemptId = "attempt_bound_exact";
+const boundAttemptDir = join(runsDir, boundRunId, "attempts", boundAttemptId);
+writeRunRecord(
+	boundRunId,
+	boundAttemptId,
+	"running",
+	null,
+	new Date().toISOString(),
+	new Date(Date.now() - 2_000).toISOString(),
+);
+writeFileSync(
+	join(boundAttemptDir, "pi-events.jsonl"),
+	JSON.stringify({ type: "message", message: { text: "bound target" } }) + "\n",
+);
+for (let index = 0; index < 10; index += 1) {
+	writeRunRecord(
+		`run_newer_${index}`,
+		`attempt_newer_${index}`,
+		"completed",
+		new Date().toISOString(),
+		new Date().toISOString(),
+	);
+}
+lp.attachProgress("tool-call-bound", cwd, () => { invalidations += 1; });
+lp.bindProgress(
+	"tool-call-bound",
+	cwd,
+	boundRunId,
+	boundAttemptId,
+	Date.parse(new Date(Date.now() - 2_000).toISOString()),
+);
+await sleep(1200);
+progress = lp.getProgress("tool-call-bound");
+check("explicit binding selects the exact run", progress?.runId === boundRunId, progress?.runId);
+check("explicit binding reads the exact attempt", progress?.lastLine === "bound target", progress?.lastLine);
+
+const parallelRunIds = ["run_parallel_a", "run_parallel_b"];
+const parallelAttemptIds = ["attempt_parallel_a", "attempt_parallel_b"];
+for (const [index, parallelRunId] of parallelRunIds.entries()) {
+	writeRunRecord(
+		parallelRunId,
+		parallelAttemptIds[index],
+		"running",
+		null,
+		new Date().toISOString(),
+		new Date(Date.now() - 1_000).toISOString(),
+	);
+}
+lp.attachProgress("tool-call-parallel", cwd, () => { invalidations += 1; });
+lp.bindProgress("tool-call-parallel", cwd, parallelRunIds[0], parallelAttemptIds[0]);
+lp.bindProgress("tool-call-parallel", cwd, parallelRunIds[1], parallelAttemptIds[1]);
+await sleep(1200);
+progress = lp.getProgress("tool-call-parallel");
+check("parallel binding keeps the aggregate running", progress?.status === "running", progress?.status);
+
+// agent_end may be observed before the registry commit. Show finalizing rather
+// than continuing to claim the loop is actively running.
+writeFileSync(
+	join(boundAttemptDir, "pi-events.jsonl"),
+	JSON.stringify({ type: "agent_end", messages: [] }) + "\n",
+);
+await sleep(1200);
+progress = lp.getProgress("tool-call-bound");
+check("agent_end reports finalizing", progress?.status === "finalizing", progress?.status);
+
+// A terminal result is authoritative even if run.json has not been finalized.
+writeFileSync(
+	join(boundAttemptDir, "result.json"),
+	JSON.stringify({ status: "completed", completedAt: new Date().toISOString() }),
+);
+await sleep(1200);
+progress = lp.getProgress("tool-call-bound");
+check("terminal result overrides stale running registry", progress?.status === "completed", progress?.status);
 
 lp.resetProgress();
 check("resetProgress clears cache", lp.getProgress("tool-call-1") === undefined);

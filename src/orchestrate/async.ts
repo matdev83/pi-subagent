@@ -26,6 +26,7 @@ import {
 	MAX_PARALLEL_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
 	SubagentToolAuthorityError,
+	type RunStartedCallback,
 	type ParallelRunResult,
 } from "./run.ts";
 import { writeRunLocator } from "./run-ref.ts";
@@ -42,6 +43,7 @@ export interface StartAsyncSubagentRunOptions {
 		result: ResultEnvelope,
 		mode: ExecutionMode,
 	) => number | Promise<number>;
+	onRunStarted?: RunStartedCallback;
 }
 
 function executionMode(input: ResolveInput): ExecutionMode {
@@ -140,6 +142,7 @@ export async function startAsyncParallelSubagentRuns(
 	cwd: string,
 	signal?: AbortSignal,
 	onComplete?: StartAsyncSubagentRunOptions["onComplete"],
+	onRunStarted?: RunStartedCallback,
 ): Promise<ParallelRunResult> {
 	if (!input.tasks || input.tasks.length === 0)
 		throw new SubagentToolAuthorityError(
@@ -185,6 +188,7 @@ export async function startAsyncParallelSubagentRuns(
 				backend: plan.backend,
 				signal,
 				onComplete,
+				onRunStarted,
 			});
 		}
 	}
@@ -295,6 +299,16 @@ export async function startAsyncSubagentRun(
 			},
 		],
 	});
+	try {
+		await options.onRunStarted?.({
+			runId,
+			attemptId,
+			cwd: options.cwd,
+			startedAt,
+		});
+	} catch {
+		// Progress binding must never change the subagent outcome.
+	}
 	await writeRunLocator({
 		cwd: options.cwd,
 		runsDir: input.runsDir,

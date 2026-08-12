@@ -54,6 +54,8 @@ import { getRunLogs, getRunStatus, waitForRun } from "./orchestrate/status.ts";
 import { showSubagentPanel } from "./panel.ts";
 import {
 	attachProgress,
+	bindProgress,
+	detachProgress,
 	formatProgress,
 	getProgress,
 	resetProgress,
@@ -247,6 +249,7 @@ function isAbortSignalLike(value: unknown): value is AbortSignal {
 
 function normalizeExecuteArgs(args: unknown[]): {
 	params: unknown;
+	toolCallId?: string;
 	signal?: AbortSignal;
 	onUpdate?: ToolUpdateCallback;
 	ctx?: unknown;
@@ -261,6 +264,7 @@ function normalizeExecuteArgs(args: unknown[]): {
 	if (typeof third === "function") {
 		return {
 			params,
+			...(typeof first === "string" ? { toolCallId: first } : {}),
 			onUpdate: third as ToolUpdateCallback,
 			ctx: fourth,
 			...(isAbortSignalLike(fifth) ? { signal: fifth } : {}),
@@ -270,6 +274,7 @@ function normalizeExecuteArgs(args: unknown[]): {
 	if (isAbortSignalLike(fifth) && !isAbortSignalLike(third)) {
 		return {
 			params,
+			...(typeof first === "string" ? { toolCallId: first } : {}),
 			signal: fifth,
 			...(typeof fourth === "function"
 				? { onUpdate: fourth as ToolUpdateCallback }
@@ -279,6 +284,7 @@ function normalizeExecuteArgs(args: unknown[]): {
 
 	return {
 		params,
+		...(typeof first === "string" ? { toolCallId: first } : {}),
 		...(isAbortSignalLike(third) ? { signal: third } : {}),
 		...(typeof fourth === "function"
 			? { onUpdate: fourth as ToolUpdateCallback }
@@ -951,8 +957,9 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 		});
 		pi.on("tool_execution_end", (event) => {
 			if (event.toolName !== TOOL_NAME) return;
-			// Keep the final cached snapshot for the settled row; the tracker
-			// auto-detaches after observing the terminal result.
+			// The host's terminal event is authoritative even if registry finalization
+			// is delayed or fails. The settled result row no longer needs polling.
+			detachProgress(event.toolCallId);
 		});
 		pi.on("session_shutdown", () => {
 			resetProgress();
@@ -1399,7 +1406,7 @@ function buildSubagentToolDefinition(
 			return new SingleLineComponent(theme.fg(color, summary));
 		},
 		async execute(...executeArgs: unknown[]) {
-			const { params, signal, onUpdate, ctx } =
+			const { params, toolCallId, signal, onUpdate, ctx } =
 				normalizeExecuteArgs(executeArgs);
 			const cwd = getCwd(ctx);
 
@@ -1442,6 +1449,27 @@ function buildSubagentToolDefinition(
 				}
 
 				const runCwd = validation.input.cwd ?? cwd;
+				const onRunStarted =
+					toolCallId === undefined
+						? undefined
+						: ({
+									runId,
+									attemptId,
+									cwd: bindingCwd,
+									startedAt,
+								}: {
+									runId: string;
+									attemptId: string;
+									cwd: string;
+									startedAt: Date;
+								}) =>
+									bindProgress(
+										toolCallId,
+										bindingCwd,
+									runId,
+									attemptId,
+									startedAt.getTime(),
+								);
 				await maybeConfirmProjectAgents(
 					validation.input,
 					runCwd,
@@ -1466,8 +1494,11 @@ function buildSubagentToolDefinition(
 										onUpdate,
 										ctx as NotificationContext,
 									),
+								onRunStarted,
 							)
-						: await runParallelSubagentTasks(validation.input, runCwd, signal);
+						: await runParallelSubagentTasks(validation.input, runCwd, signal, {
+								onRunStarted,
+							});
 					const runs = parallel.results.map((result) => compactResult(result));
 					const failed =
 						!asyncRequested &&
@@ -1501,6 +1532,7 @@ function buildSubagentToolDefinition(
 						cwd: runCwd,
 						backend: resolved.backend,
 						signal,
+						onRunStarted,
 						onComplete: (completed, completedMode) =>
 							notifyCompletion(
 								validation.input,
@@ -1517,6 +1549,7 @@ function buildSubagentToolDefinition(
 					input: validation.input,
 					cwd: runCwd,
 					signal,
+					onRunStarted,
 				});
 				return textResult(
 					compactResult(result),

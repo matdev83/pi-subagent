@@ -34,8 +34,10 @@ interface ProgressEntry {
 	cwd: string;
 	startedAt: number;
 	invalidate: () => void;
-	runId: string | null;
+	boundRuns: Array<{ runId: string; attemptId: string | null }>;
+	hasExplicitBinding: boolean;
 	terminalTicks: number;
+	missingSince: number | null;
 }
 
 interface ScannedRun {
@@ -63,9 +65,12 @@ const MATCH_MAX_LAG_MS = 90_000;
 const TERMINAL_DETACH_TICKS = 2;
 /** Entries that never matched a run are dropped after this long. */
 const UNMATCHED_TTL_MS = 10 * 60_000;
+/** Bound entries with a vanished run are dropped after this long. */
+const MISSING_RUN_TTL_MS = 2 * 60_000;
 const TAIL_BYTES = 4_096;
 const LAST_LINE_MAX = 40;
 const PROGRESS_FILES = ["pi-events.jsonl", "output.log", "stderr.log", "result.json"];
+let tickInFlight = false;
 
 /**
  * Start tracking live progress for a tool call. Idempotent per toolCallId.
@@ -81,7 +86,8 @@ export function attachProgress(
 		existing.invalidate = invalidate;
 		if (existing.cwd !== cwd) {
 			existing.cwd = cwd;
-			existing.runId = null;
+			existing.boundRuns = [];
+			existing.hasExplicitBinding = false;
 			existing.startedAt = Date.now();
 			existing.terminalTicks = 0;
 			progressCache.delete(toolCallId);
@@ -93,9 +99,49 @@ export function attachProgress(
 		cwd,
 		startedAt: Date.now(),
 		invalidate,
-		runId: null,
+		boundRuns: [],
+		hasExplicitBinding: false,
 		terminalTicks: 0,
+		missingSince: null,
 	});
+	ensureTimer();
+}
+
+/** Bind a tool call to the run record created for that call. */
+export function bindProgress(
+	toolCallId: string,
+	cwd: string,
+	runId: string,
+	attemptId: string,
+	startedAt?: number,
+): void {
+	const existing = entries.get(toolCallId);
+	if (existing === undefined) {
+		entries.set(toolCallId, {
+			toolCallId,
+			cwd,
+			startedAt: startedAt ?? Date.now(),
+			invalidate: () => undefined,
+			boundRuns: [{ runId, attemptId }],
+			hasExplicitBinding: true,
+			terminalTicks: 0,
+			missingSince: null,
+		});
+	} else {
+		existing.cwd = cwd;
+		if (!existing.hasExplicitBinding) {
+			existing.boundRuns = [];
+			existing.hasExplicitBinding = true;
+		}
+		const existingRun = existing.boundRuns.find((run) => run.runId === runId);
+		if (existingRun === undefined)
+			existing.boundRuns.push({ runId, attemptId });
+		else existingRun.attemptId = attemptId;
+		if (startedAt !== undefined)
+			existing.startedAt = Math.min(existing.startedAt, startedAt);
+		existing.terminalTicks = 0;
+		existing.missingSince = null;
+	}
 	ensureTimer();
 }
 
@@ -119,13 +165,20 @@ export function resetProgress(): void {
 
 function ensureTimer(): void {
 	if (timer !== undefined) return;
-	timer = setInterval(() => void tick(), TICK_MS);
+	timer = setInterval(() => {
+		if (tickInFlight) return;
+		tickInFlight = true;
+		void tick().finally(() => {
+			tickInFlight = false;
+		});
+	}, TICK_MS);
 }
 
 function stopTimerIfIdle(): void {
 	if (entries.size !== 0 || timer === undefined) return;
 	clearInterval(timer);
 	timer = undefined;
+	tickInFlight = false;
 }
 
 async function tick(): Promise<void> {
@@ -142,21 +195,36 @@ async function tick(): Promise<void> {
 	}
 	for (const [cwd, group] of byCwd) {
 		const runs = await scanRuns(cwd);
-		if (runs.length === 0) continue;
 		const sortedEntries = [...group].sort((a, b) => a.startedAt - b.startedAt);
 		const sortedRuns = [...runs]
 			.filter((run) => run.startedAt > 0)
 			.sort((a, b) => a.startedAt - b.startedAt);
 		const used = new Set<number>();
 		for (const entry of sortedEntries) {
-			if (entry.runId !== null) {
-				// Already matched: keep polling the same run for updates.
-				const matched = runs.find((run) => run.runId === entry.runId);
-				if (matched !== undefined) {
-					await updateEntry(entry, matched, now);
+			if (entry.boundRuns.length > 0) {
+				// Explicitly bound calls do not depend on recency or the newest-run cap.
+				const matched = (
+					await Promise.all(
+						entry.boundRuns.map(async (bound) => ({
+							bound,
+							run: await readRun(cwd, bound.runId),
+						})),
+					)
+				).filter(
+					(candidate): candidate is {
+						bound: { runId: string; attemptId: string | null };
+						run: ScannedRun;
+					} => candidate.run !== undefined,
+				);
+				if (matched.length > 0) {
+					entry.missingSince = null;
+					await updateBoundEntry(entry, matched, now);
+				} else {
+					entry.missingSince ??= now;
 				}
 				continue;
 			}
+			if (runs.length === 0) continue;
 			let matchedIndex = -1;
 			for (let index = 0; index < sortedRuns.length; index += 1) {
 				if (used.has(index)) continue;
@@ -169,7 +237,10 @@ async function tick(): Promise<void> {
 			}
 			if (matchedIndex < 0) continue;
 			used.add(matchedIndex);
-			entry.runId = sortedRuns[matchedIndex]!.runId;
+			entry.boundRuns.push({
+				runId: sortedRuns[matchedIndex]!.runId,
+				attemptId: sortedRuns[matchedIndex]!.latestAttemptId,
+			});
 			await updateEntry(entry, sortedRuns[matchedIndex]!, now);
 		}
 	}
@@ -177,10 +248,17 @@ async function tick(): Promise<void> {
 	// entries that never matched anything within the TTL.
 	for (const [toolCallId, entry] of [...entries]) {
 		const matchedTerminal =
-			entry.runId !== null && entry.terminalTicks >= TERMINAL_DETACH_TICKS;
+			entry.boundRuns.length > 0 &&
+			entry.terminalTicks >= TERMINAL_DETACH_TICKS;
 		const staleUnmatched =
-			entry.runId === null && now - entry.startedAt > UNMATCHED_TTL_MS;
-		if (matchedTerminal || staleUnmatched) detachProgress(toolCallId);
+			entry.boundRuns.length === 0 &&
+			now - entry.startedAt > UNMATCHED_TTL_MS;
+		const missingBoundRun =
+			entry.boundRuns.length > 0 &&
+			entry.missingSince !== null &&
+			now - entry.missingSince > MISSING_RUN_TTL_MS;
+		if (matchedTerminal || staleUnmatched || missingBoundRun)
+			detachProgress(toolCallId);
 	}
 }
 
@@ -201,8 +279,34 @@ async function updateEntry(
 	}
 }
 
+async function updateBoundEntry(
+	entry: ProgressEntry,
+	matched: Array<{
+		bound: { runId: string; attemptId: string | null };
+		run: ScannedRun;
+	}>,
+	now: number,
+): Promise<void> {
+	const progress = aggregateProgress(
+		await Promise.all(
+			matched.map(({ bound, run }) =>
+				buildProgress(entry.cwd, run, now, bound.attemptId),
+			),
+		),
+	);
+	progressCache.set(entry.toolCallId, progress);
+	entry.terminalTicks = isTerminal(progress.status)
+		? entry.terminalTicks + 1
+		: 0;
+	try {
+		entry.invalidate();
+	} catch {
+		// Component may already be gone; the tracker's TTL cleans up.
+	}
+}
+
 function isTerminal(status: string): boolean {
-	return status !== "running" && status !== "pending";
+	return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 async function scanRuns(cwd: string): Promise<ScannedRun[]> {
@@ -223,29 +327,40 @@ async function scanRuns(cwd: string): Promise<ScannedRun[]> {
 		if (raw === null || typeof raw !== "object") continue;
 		const record = raw as Record<string, unknown>;
 		if (typeof record.runId !== "string") continue;
-		const startedAt = Date.parse(
-			typeof record.startedAt === "string" ? record.startedAt : "",
-		);
-		runs.push({
-			dir: dir.name,
-			runId: record.runId,
-			status:
-				typeof record.status === "string" ? record.status : "running",
-			backend:
-				typeof record.backend === "string" ? record.backend : "",
-			startedAt,
-			completedAt: Date.parse(
-				typeof record.completedAt === "string"
-					? record.completedAt
-					: "",
-			) || null,
-			latestAttemptId:
-				typeof record.latestAttemptId === "string"
-					? record.latestAttemptId
-					: null,
-		});
+		runs.push(scannedRunFromRecord(record, dir.name));
 	}
 	return runs;
+}
+
+async function readRun(cwd: string, runId: string): Promise<ScannedRun | undefined> {
+	const raw = await readJson(join(cwd, RUNS_DIR, runId, "run.json"));
+	if (raw === null || typeof raw !== "object") return undefined;
+	const record = raw as Record<string, unknown>;
+	if (typeof record.runId !== "string") return undefined;
+	return scannedRunFromRecord(record, runId);
+}
+
+function scannedRunFromRecord(
+	record: Record<string, unknown>,
+	dir: string,
+): ScannedRun {
+	return {
+		dir,
+		runId: record.runId as string,
+		status: typeof record.status === "string" ? record.status : "running",
+		backend: typeof record.backend === "string" ? record.backend : "",
+		startedAt: Date.parse(
+			typeof record.startedAt === "string" ? record.startedAt : "",
+		),
+		completedAt:
+			Date.parse(
+				typeof record.completedAt === "string" ? record.completedAt : "",
+			) || null,
+		latestAttemptId:
+			typeof record.latestAttemptId === "string"
+				? record.latestAttemptId
+				: null,
+	};
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -260,16 +375,20 @@ async function buildProgress(
 	cwd: string,
 	run: ScannedRun,
 	now: number,
+	attemptIdOverride?: string | null,
 ): Promise<LiveProgress> {
 	let lastActivityAt = run.startedAt;
 	let lastLine = "";
-	if (run.latestAttemptId !== null) {
+	let status = run.status;
+	let completedAt = run.completedAt;
+	const attemptId = attemptIdOverride ?? run.latestAttemptId;
+	if (attemptId !== null) {
 		const attemptDir = join(
 			cwd,
 			RUNS_DIR,
 			run.runId,
 			"attempts",
-			run.latestAttemptId,
+			attemptId,
 		);
 		let newestMtime = run.startedAt;
 		for (const name of PROGRESS_FILES) {
@@ -284,16 +403,65 @@ async function buildProgress(
 				: await tailFile(join(attemptDir, "output.log"));
 		lastLine = meaningfulLastLine(outputTail);
 		lastActivityAt = newestMtime;
+		const result = await readJson(join(attemptDir, "result.json"));
+		if (result !== null && typeof result === "object") {
+			const resultRecord = result as Record<string, unknown>;
+			if (
+				resultRecord.status === "completed" ||
+				resultRecord.status === "failed" ||
+				resultRecord.status === "cancelled"
+			)
+				status = resultRecord.status;
+			if (typeof resultRecord.completedAt === "string") {
+				const resultCompletedAt = Date.parse(resultRecord.completedAt);
+				if (Number.isFinite(resultCompletedAt)) completedAt = resultCompletedAt;
+			}
+		}
+		if (status === "running" && /"type"\s*:\s*"agent_end"/.test(eventsTail))
+			status = "finalizing";
 	}
 	return {
 		runId: run.runId,
-		attemptId: run.latestAttemptId,
+		attemptId,
 		backend: run.backend,
-		status: run.status,
+		status,
 		startedAt: run.startedAt,
-		completedAt: run.completedAt,
+		completedAt,
 		lastActivityAt,
 		lastLine: clip(sanitizeLine(lastLine), LAST_LINE_MAX),
+	};
+}
+
+function aggregateProgress(progresses: LiveProgress[]): LiveProgress {
+	const first = progresses[0]!;
+	const allTerminal = progresses.every((progress) => isTerminal(progress.status));
+	const status = progresses.some((progress) => progress.status === "running")
+		? "running"
+		: progresses.some((progress) => progress.status === "pending")
+			? "pending"
+			: progresses.some((progress) => progress.status === "finalizing")
+				? "finalizing"
+				: progresses.some((progress) => progress.status === "failed")
+					? "failed"
+					: progresses.some((progress) => progress.status === "cancelled")
+						? "cancelled"
+						: "completed";
+	const latest = [...progresses].sort(
+		(a, b) => b.lastActivityAt - a.lastActivityAt,
+	)[0]!;
+	return {
+		...first,
+		status,
+		startedAt: Math.min(...progresses.map((progress) => progress.startedAt)),
+		completedAt: allTerminal
+			? Math.max(
+					...progresses.map(
+						(progress) => progress.completedAt ?? progress.startedAt,
+					),
+				)
+			: null,
+		lastActivityAt: latest.lastActivityAt,
+		lastLine: latest.lastLine,
 	};
 }
 
@@ -386,6 +554,7 @@ export function formatProgress(progress: LiveProgress): string {
 	if (progress.status === "completed") return `done in ${elapsed}`;
 	if (progress.status === "failed") return `failed after ${elapsed}`;
 	if (progress.status === "cancelled") return `cancelled after ${elapsed}`;
+	if (progress.status === "finalizing") return `finalizing after ${elapsed}`;
 	const last = progress.lastLine.length > 0 ? ` · ${progress.lastLine}` : "";
 	return `${elapsed} · live${last}`;
 }

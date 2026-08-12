@@ -37,6 +37,17 @@ export const DEFAULT_PARALLEL_CONCURRENCY = 4;
 export const MAX_PARALLEL_TASKS = 12;
 export const MAX_PARALLEL_CONCURRENCY = 10;
 
+export interface RunStartedInfo {
+	runId: string;
+	attemptId: string;
+	cwd: string;
+	startedAt: Date;
+}
+
+export type RunStartedCallback = (
+	info: RunStartedInfo,
+) => void | Promise<void>;
+
 export interface RunSubagentTaskOptions {
 	input: ResolveInput;
 	cwd: string;
@@ -44,10 +55,12 @@ export interface RunSubagentTaskOptions {
 	runId?: string;
 	attemptId?: string;
 	taskIndex?: number;
+	onRunStarted?: RunStartedCallback;
 }
 
 export interface MultiRunOptions {
 	correlationId?: string;
+	onRunStarted?: RunStartedCallback;
 }
 
 export interface ParallelRunResult {
@@ -250,6 +263,11 @@ export async function runSubagentTask(
 			},
 		],
 	});
+	try {
+		await options.onRunStarted?.({ runId, attemptId, cwd: baseCwd, startedAt });
+	} catch {
+		// Progress binding must never change the subagent outcome.
+	}
 	await writeRunLocator({
 		...runRef,
 		parentSessionId: input.parentSessionId,
@@ -479,6 +497,7 @@ export async function runParallelSubagentTasks(
 					runId,
 					attemptId,
 					taskIndex: index,
+					onRunStarted: _options.onRunStarted,
 				});
 				resultSlots[index] = result;
 				const parentCancelled =

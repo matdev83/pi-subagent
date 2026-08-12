@@ -27,9 +27,12 @@ TUI commands:
 /subagent disable
 /subagent panel
 /subagent watch [1-9]
+/subagent kill [runId|all]
 ```
 
 `/subagent enable` and `/subagent disable` control whether the `subagent` tool is active for the current Pi session. Disabling removes the tool from the active LLM tool set and rebuilds the system prompt, so the model cannot call it or see its tool schema. The command itself remains available so the feature can be re-enabled later. The setting is session-local and defaults to enabled.
+
+`/subagent kill` cancels the only active run in the current session. When multiple runs are active, specify `/subagent kill <runId>` or use `/subagent kill all` to cancel all active runs in the session. It uses the same graceful interrupt and escalation path as the tool's `action: "interrupt"`.
 
 ## Actions
 

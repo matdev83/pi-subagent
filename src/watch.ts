@@ -194,7 +194,7 @@ export async function openSubagentWatch(
 	);
 }
 
-function currentSessionIdFromCtx(ctx: ExtensionContext): string | undefined {
+export function currentSessionIdFromCtx(ctx: ExtensionContext): string | undefined {
 	const raw = ctx as unknown as {
 		sessionManager?: { getSessionId?: () => unknown };
 	};
@@ -643,10 +643,11 @@ export class SubagentWatch implements Component {
 	render(width: number): string[] {
 		const dialogWidth = Math.max(24, width);
 		const innerWidth = Math.max(22, dialogWidth - 2);
+		const contentWidth = Math.max(20, innerWidth - 2);
 		const frameLine = (content: string): string => {
-			const truncated = truncateToWidth(content, innerWidth, "");
-			const padding = Math.max(0, innerWidth - visibleWidth(truncated));
-			return `${style(this.theme, "border", "│")}${truncated}${" ".repeat(padding)}${style(this.theme, "border", "│")}`;
+			const truncated = truncateToWidth(content, contentWidth, "");
+			const padding = Math.max(0, contentWidth - visibleWidth(truncated));
+			return `${style(this.theme, "border", "│")} ${truncated}${" ".repeat(padding)} ${style(this.theme, "border", "│")}`;
 		};
 		const borderLine = (edge: "top" | "bottom"): string =>
 			style(
@@ -678,18 +679,18 @@ export class SubagentWatch implements Component {
 		lines.push(frameLine(style(this.theme, "muted", activity)));
 		lines.push(ruleLine());
 		const taskLines = run.task.length > 0
-			? wrapTextWithAnsi(`task: ${run.task}`, innerWidth)
+			? wrapTextWithAnsi(`task: ${run.task}`, contentWidth)
 			: [];
 		for (const line of taskLines) lines.push(frameLine(style(this.theme, "muted", line)));
 		if (taskLines.length > 0) lines.push(ruleLine());
-		const transcriptLines = this.renderTranscript(innerWidth);
+		const transcriptLines = this.renderTranscript(contentWidth);
 		const output = this.run.outputTail;
 		const terminalLines =
 			transcriptLines.length > 0
 				? transcriptLines
 				: output.length === 0
 					? [style(this.theme, "muted", "(no session output available)")]
-					: output.flatMap((line) => wrapTextWithAnsi(line, innerWidth));
+					: output.flatMap((line) => wrapTextWithAnsi(line, contentWidth));
 		const viewportHeight = Math.max(
 			8,
 			Math.min(40, Math.floor((process.stdout.rows ?? 30) * 0.76)),
@@ -715,7 +716,7 @@ export class SubagentWatch implements Component {
 				style(
 					this.theme,
 					"dim",
-					`↑${this.scrollOffset} ↓${Math.max(0, maxScroll - this.scrollOffset)} · ${this.followTail ? "following tail" : "paused"} · wheel/↑↓/jk · End follow · q/esc close`,
+					`↑${this.scrollOffset} ↓${Math.max(0, maxScroll - this.scrollOffset)} · ${this.followTail ? "following tail" : "paused"} · wheel/↑↓/jk · End · q/esc`,
 				),
 			),
 		);

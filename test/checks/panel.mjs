@@ -344,6 +344,8 @@ async function main() {
 	assert.equal(registeredCommand.getArgumentCompletions("zzz"), null);
 	assert.equal(registeredCommand.getArgumentCompletions("en")?.[0]?.value, "enable");
 	assert.equal(registeredCommand.getArgumentCompletions("di")?.[0]?.value, "disable");
+	assert.equal(registeredCommand.getArgumentCompletions("ki")?.[0]?.value, "kill");
+	assert.equal(registeredCommand.getArgumentCompletions("kill ")?.[0]?.value, "all");
 	const commandCtx = { cwd: process.cwd(), ui: { notify() {} } };
 	await registeredCommand.handler("disable", commandCtx);
 	assert.equal(activeTools.includes("subagent"), false);
@@ -402,6 +404,20 @@ async function main() {
 			await registeredCommand.handler(args, ctx);
 			return { component, closeCount: () => closeCount };
 		}
+		const emptyKillCwd = join(tempRoot, "empty-kill-workspace");
+		await mkdir(emptyKillCwd, { recursive: true });
+		const beforeEmptyKill = notifications.length;
+		await runCommand("kill", { cwd: emptyKillCwd });
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/No active subagent runs to kill/,
+			"bare kill should report when no active runs exist",
+		);
+		assert.equal(
+			notifications.length,
+			beforeEmptyKill + 1,
+			"empty kill should emit one notification",
+		);
 
 		await registeredCommand.handler("", {
 			cwd,
@@ -1120,6 +1136,44 @@ async function main() {
 			oldOrderPayload.snapshot?.runId,
 			"run_execute_signature",
 			"execute should also support the older Pi tool-call order",
+		);
+
+		await writeIndexedRun(indexDir, cwd, "run_slash_kill_one", "attempt-1", {
+			status: "running",
+			backend: "headless",
+			parentSessionId: sessionId,
+			log: "slash kill target one",
+		});
+		await runCommand("kill run_slash_kill_one", {
+			sessionManager: { getSessionId: () => sessionId },
+		});
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/run_slash_kill_one: kill requested/,
+			"explicit kill should dispatch to the lifecycle interrupt path",
+		);
+		await writeIndexedRun(indexDir, cwd, "run_slash_kill_two", "attempt-1", {
+			status: "running",
+			backend: "headless",
+			parentSessionId: sessionId,
+			log: "slash kill target two",
+		});
+		await runCommand("kill", {
+			sessionManager: { getSessionId: () => sessionId },
+		});
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/Multiple active subagents found.*kill all/,
+			"bare kill should require a target when multiple runs are active",
+		);
+		await runCommand("kill all", {
+			sessionManager: { getSessionId: () => sessionId },
+		});
+		const killAllMessage = notifications.at(-1)?.message ?? "";
+		const killAllCount = Number(killAllMessage.match(/Kill all: (\d+) kill requested/)?.[1] ?? 0);
+		assert.ok(
+			killAllCount >= 2,
+			"kill all should report an aggregate result for every active run",
 		);
 
 		console.log(

@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { Type } from "typebox";
 import type {
 	ExtensionAPI,
+	ExtensionCommandContext,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -62,6 +63,7 @@ import {
 	type LiveProgress,
 } from "./live-progress.ts";
 import {
+	currentSessionIdFromCtx,
 	listSessionRuns,
 	openSubagentWatch,
 	registerSubagentWatchShortcuts,
@@ -942,6 +944,110 @@ function notifyCompletion(
 	return updatesSent;
 }
 
+async function activeSessionRuns(
+	ctx: ExtensionCommandContext,
+): Promise<Array<{ runId: string; status: string }>> {
+	const sessionId = currentSessionIdFromCtx(ctx);
+	let runs = await listSessionRuns(ctx.cwd, sessionId);
+	if (runs.length === 0 && sessionId !== undefined)
+		runs = await listSessionRuns(ctx.cwd, undefined);
+	return runs
+		.filter((run) => run.status === "running" || run.status === "pending")
+		.map((run) => ({ runId: run.runId, status: run.status }));
+}
+
+async function killSubagent(
+	ctx: ExtensionCommandContext,
+	runId: string,
+): Promise<Awaited<ReturnType<typeof interruptRun>>> {
+	return await interruptRun({
+		cwd: ctx.cwd,
+		runId,
+		reason: "killed via /subagent kill",
+	});
+}
+
+function notifyKillResult(
+	ctx: ExtensionCommandContext,
+	result: Awaited<ReturnType<typeof interruptRun>>,
+): void {
+	const prefix = `Subagent ${result.runId}`;
+	if (result.status === "interrupt-requested") {
+		ctx.ui.notify?.(`${prefix}: kill requested.`, "info");
+		return;
+	}
+	if (result.status === "already-terminal") {
+		ctx.ui.notify?.(`${prefix}: already finished.`, "info");
+		return;
+	}
+	if (result.status === "not-found") {
+		ctx.ui.notify?.(`${prefix}: run not found.`, "warning");
+		return;
+	}
+	ctx.ui.notify?.(`${prefix}: kill is unsupported for this run.`, "warning");
+}
+
+async function handleKillCommand(
+	args: string,
+	ctx: ExtensionCommandContext,
+): Promise<boolean> {
+	const match = /^kill(?:\s+(all|[A-Za-z0-9._-]+))?$/.exec(args);
+	if (match === null) return false;
+	const target = match[1];
+	const active = await activeSessionRuns(ctx);
+	if (target === undefined && active.length === 0) {
+		ctx.ui.notify?.("No active subagent runs to kill.", "info");
+		return true;
+	}
+	if (target === undefined && active.length > 1) {
+		ctx.ui.notify?.(
+			"Multiple active subagents found. Use `/subagent kill <runId>` or `/subagent kill all`.",
+			"warning",
+		);
+		return true;
+	}
+	const runIds = target === "all"
+		? active.map((run) => run.runId)
+		: [target ?? active[0]!.runId];
+	if (runIds.length === 0) {
+		ctx.ui.notify?.("No active subagent runs to kill.", "info");
+		return true;
+	}
+	if (runIds.length === 1 && target !== "all") {
+		const result = await killSubagent(ctx, runIds[0]!);
+		notifyKillResult(ctx, result);
+		return true;
+	}
+	const results = await Promise.all(
+		runIds.map(async (runId) => {
+			try {
+				return await killSubagent(ctx, runId);
+			} catch {
+				return null;
+			}
+		}),
+	);
+	const requested = results.filter(
+		(result) => result?.status === "interrupt-requested",
+	).length;
+	const alreadyFinished = results.filter(
+		(result) => result?.status === "already-terminal",
+	).length;
+	const unsupported = results.filter(
+		(result) => result?.status === "unsupported",
+	).length;
+	const notFoundOrFailed = results.length - requested - alreadyFinished - unsupported;
+	const details = [`${requested} kill requested`];
+	if (alreadyFinished > 0) details.push(`${alreadyFinished} already finished`);
+	if (unsupported > 0) details.push(`${unsupported} unsupported`);
+	if (notFoundOrFailed > 0) details.push(`${notFoundOrFailed} failed or not found`);
+	ctx.ui.notify?.(
+		`Kill all: ${details.join(", ")}.`,
+		notFoundOrFailed > 0 ? "warning" : "info",
+	);
+	return true;
+}
+
 export default function registerSubagentEngine(pi: ExtensionAPI) {
 	registerSubagentWatchShortcuts(pi);
 	if (typeof pi.on === "function") {
@@ -976,8 +1082,21 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 	if (typeof pi.registerCommand === "function") {
 		pi.registerCommand("subagent", {
 			description:
-				"Subagent utilities. Use `/subagent enable|disable` to control LLM exposure, `/subagent panel` for status, or `/subagent watch [1-9]` for a live run.",
+				"Subagent utilities. Use `/subagent enable|disable` to control LLM exposure, `/subagent panel` for status, `/subagent watch [1-9]` for a live run, or `/subagent kill [runId|all]` to cancel runs.",
 			getArgumentCompletions(prefix) {
+				if (/^kill\s+/i.test(prefix)) {
+					const value = prefix.trim().slice("kill".length).trim();
+					if ("all".startsWith(value.toLowerCase())) {
+						return [
+							{
+								value: "all",
+								label: "all",
+								description: "Cancel all active runs in this Pi session",
+							},
+						];
+					}
+					return null;
+				}
 				const items = [
 					{
 						value: "enable",
@@ -998,6 +1117,11 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 						value: "watch",
 						label: "watch [number]",
 						description: "Open one subagent run in a modal",
+					},
+					{
+						value: "kill",
+						label: "kill [runId|all]",
+						description: "Cancel one run, the only active run, or all active runs",
 					},
 				];
 				const filtered = items.filter((item) =>
@@ -1030,8 +1154,9 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 					await openSubagentWatch(ctx, Number(watchMatch[1] ?? "1") - 1);
 					return;
 				}
+				if (await handleKillCommand(normalizedArgs, ctx)) return;
 				ctx.ui.notify?.(
-					"Usage: /subagent enable|disable|panel or /subagent watch [1-9]",
+					"Usage: /subagent enable|disable|panel|watch [1-9]|kill [runId|all]",
 					"warning",
 				);
 			},

@@ -65,6 +65,11 @@ const lines = modal.render(80);
 const joined = lines.join("\n");
 check("render produces lines", lines.length >= 6, `lines=${lines.length}`);
 check("title shows subagent #1", joined.includes("subagent #1"), lines[1]);
+check(
+	"content has one-character horizontal padding",
+		lines[1].startsWith("[border]│[/border] "),
+		lines[1],
+	);
 check("status shown", joined.includes("running"));
 check(
 	"run identity or status shown in narrow render",

@@ -130,11 +130,33 @@ process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "ass
 		1,
 		"only the small streaming delta should be retained",
 	);
+	const retainedDelta = events.find((event) => event.type === "message_update");
+	assert.deepEqual(retainedDelta?.assistantMessageEvent, {
+		type: "text_delta",
+		contentIndex: 0,
+		delta: "streaming delta",
+	});
+	const retainedToolStart = events.find(
+		(event) => event.type === "tool_execution_start",
+	);
+	const retainedToolUpdate = events.find(
+		(event) => event.type === "tool_execution_update",
+	);
+	const retainedToolEnd = events.find(
+		(event) => event.type === "tool_execution_end",
+	);
+	assert.equal("args" in (retainedToolStart ?? {}), false);
+	assert.equal("partialResult" in (retainedToolUpdate ?? {}), false);
+	assert.equal("result" in (retainedToolEnd ?? {}), false);
 	assert.ok(eventsText.length < 256 * 1024, "live event transcript should be bounded");
 	assert.equal(eventsText.includes("secret-token"), false);
 	assert.equal(eventsText.includes("cookie-secret"), false);
 	assert.equal(eventsText.includes("api-key-secret"), false);
 	assert.equal(eventsText.includes("token=secret"), false);
+	assert.equal(eventsText.includes("should-not-appear-update-secret"), false);
+	assert.equal(eventsText.includes("result-body-secret"), false);
+	assert.equal(eventsText.includes("failed-update-secret"), false);
+	assert.equal(eventsText.includes("result-secret-redacted"), false);
 
 	assert.equal(
 		result.artifacts.some((artifact) => artifact.type === "stdout"),

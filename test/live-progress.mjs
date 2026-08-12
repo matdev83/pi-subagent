@@ -136,6 +136,17 @@ progress = lp.getProgress("tool-call-bound");
 check("explicit binding selects the exact run", progress?.runId === boundRunId, progress?.runId);
 check("explicit binding reads the exact attempt", progress?.lastLine === "bound target", progress?.lastLine);
 
+writeFileSync(
+	join(boundAttemptDir, "pi-events.jsonl"),
+	JSON.stringify({
+		type: "message_update",
+		assistantMessageEvent: { type: "text_delta", delta: "latest assistant delta" },
+	}) + "\n",
+);
+await sleep(1200);
+progress = lp.getProgress("tool-call-bound");
+check("streaming delta is shown as live text", progress?.lastLine === "latest assistant delta", progress?.lastLine);
+
 const parallelRunIds = ["run_parallel_a", "run_parallel_b"];
 const parallelAttemptIds = ["attempt_parallel_a", "attempt_parallel_b"];
 for (const [index, parallelRunId] of parallelRunIds.entries()) {

@@ -1,7 +1,6 @@
 import { once } from "node:events";
 import { execFileSync, spawn } from "node:child_process";
 import {
-	appendFileSync,
 	createReadStream,
 	createWriteStream,
 	existsSync,
@@ -320,11 +319,6 @@ const STDERR_TEXT_LIMIT = 256 * 1024;
 const LIVE_EVENT_MAX_BYTES = 4 * 1024 * 1024;
 const LIVE_EVENT_MAX_LINE_BYTES = 64 * 1024;
 const LIVE_EVENT_MAX_STRING_CHARS = 4 * 1024;
-const LIVE_EVENT_MAX_DEPTH = 6;
-const LIVE_EVENT_MAX_KEYS = 32;
-const LIVE_EVENT_MAX_ARRAY_ITEMS = 64;
-const LIVE_EVENT_SENSITIVE_KEY_PATTERN =
-	/(?:api[_-]?key|token|secret|password|authorization|cookie|credential|private[_-]?key)/i;
 const LIVE_EVENT_URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
 
 function emptyParseResult(): PiJsonParseResult {
@@ -499,56 +493,94 @@ class PiJsonStreamParser {
 	}
 }
 
-function sanitizeLiveEventValue(value: unknown, depth = 0): unknown {
-	if (value === null || typeof value === "number" || typeof value === "boolean")
-		return value;
-	if (typeof value === "string") {
-		const sanitized = sanitizeLiveEventString(value);
-		return sanitized.length <= LIVE_EVENT_MAX_STRING_CHARS
-			? sanitized
-			: `${sanitized.slice(0, LIVE_EVENT_MAX_STRING_CHARS - 1)}…`;
-	}
-	if (depth >= LIVE_EVENT_MAX_DEPTH) return "[truncated]";
-	if (Array.isArray(value))
-		return value
-			.slice(0, LIVE_EVENT_MAX_ARRAY_ITEMS)
-			.map((item) => sanitizeLiveEventValue(item, depth + 1));
-	if (typeof value !== "object") return `[${typeof value}]`;
-
-	const record = value as Record<string, unknown>;
-	const sanitized: Record<string, unknown> = {};
-	for (const key of Object.keys(record).slice(0, LIVE_EVENT_MAX_KEYS)) {
-		sanitized[key] = LIVE_EVENT_SENSITIVE_KEY_PATTERN.test(key)
-			? "[REDACTED]"
-			: sanitizeLiveEventValue(record[key], depth + 1);
-	}
-	return sanitized;
-}
-
-function shouldPersistLiveEvent(event: unknown): boolean {
-	if (typeof event !== "object" || event === null) return false;
+function persistedLiveEvent(event: unknown): Record<string, unknown> | undefined {
+	if (typeof event !== "object" || event === null) return undefined;
 	const record = event as Record<string, unknown>;
-	if (record.type !== "message_update") return true;
-	const update = record.assistantMessageEvent;
-	if (typeof update !== "object" || update === null) return false;
-	const updateRecord = update as Record<string, unknown>;
-	return (
-		(updateRecord.type === "text_delta" ||
-			updateRecord.type === "thinking_delta") &&
-		typeof updateRecord.delta === "string" &&
-		updateRecord.delta.length <= LIVE_EVENT_MAX_STRING_CHARS
-	);
+	if (typeof record.type !== "string") return undefined;
+
+	if (record.type === "message_update") {
+		const update = record.assistantMessageEvent;
+		if (typeof update !== "object" || update === null) return undefined;
+		const updateRecord = update as Record<string, unknown>;
+		if (
+			(updateRecord.type !== "text_delta" &&
+				updateRecord.type !== "thinking_delta") ||
+			typeof updateRecord.delta !== "string" ||
+			updateRecord.delta.length > LIVE_EVENT_MAX_STRING_CHARS
+		)
+			return undefined;
+		return {
+			type: record.type,
+			assistantMessageEvent: {
+				type: updateRecord.type,
+				...(typeof updateRecord.contentIndex === "number"
+					? { contentIndex: updateRecord.contentIndex }
+					: {}),
+				delta: sanitizeLiveEventString(updateRecord.delta),
+			},
+		};
+	}
+
+	if (record.type === "message_start" || record.type === "message_end") {
+		const message = record.message;
+		if (typeof message !== "object" || message === null) return undefined;
+		const role = (message as Record<string, unknown>).role;
+		if (role !== "assistant") return undefined;
+		return {
+			type: record.type,
+			message: { role, content: [] },
+		};
+	}
+
+	if (
+		record.type === "tool_execution_start" ||
+		record.type === "tool_execution_update" ||
+		record.type === "tool_execution_end"
+	) {
+		return {
+			type: record.type,
+			...(typeof record.toolCallId === "string"
+				? { toolCallId: record.toolCallId }
+				: {}),
+			...(typeof record.toolName === "string"
+				? { toolName: record.toolName }
+				: {}),
+			...(typeof record.isError === "boolean"
+				? { isError: record.isError }
+				: {}),
+		};
+	}
+
+	if (
+		record.type === "agent_end" ||
+		record.type === "turn_end" ||
+		record.type === "error"
+	)
+		return { type: record.type };
+	return undefined;
 }
 
-function createLiveEventAppender(eventPath: string): (event: unknown) => void {
+function createLiveEventAppender(eventPath: string): {
+	append: (event: unknown) => void;
+	close: () => Promise<void>;
+} {
+	const stream = createWriteStream(eventPath, { flags: "a" });
 	let bytesWritten = 0;
 	let enabled = true;
+	let streamFailed = false;
+	let closePromise: Promise<void> | undefined;
+	stream.on("error", () => {
+		streamFailed = true;
+		enabled = false;
+	});
 
-	return (event: unknown): void => {
-		if (!enabled || !shouldPersistLiveEvent(event)) return;
+	function append(event: unknown): void {
+		if (!enabled) return;
+		const persisted = persistedLiveEvent(event);
+		if (persisted === undefined) return;
 		let line: string;
 		try {
-			line = `${JSON.stringify(sanitizeLiveEventValue(event))}\n`;
+			line = `${JSON.stringify(persisted)}\n`;
 		} catch {
 			return;
 		}
@@ -559,13 +591,27 @@ function createLiveEventAppender(eventPath: string): (event: unknown) => void {
 		)
 			return;
 		try {
-			appendFileSync(eventPath, line, "utf8");
+			stream.write(line, "utf8");
 			bytesWritten += lineBytes;
 		} catch {
 			// Live observability must never change the child run outcome.
 			enabled = false;
 		}
-	};
+	}
+
+	function close(): Promise<void> {
+		if (closePromise !== undefined) return closePromise;
+		if (streamFailed || stream.destroyed) return Promise.resolve();
+		closePromise = new Promise((resolve) => {
+			const done = (): void => resolve();
+			stream.once("finish", done);
+			stream.once("error", done);
+			stream.end();
+		});
+		return closePromise;
+	}
+
+	return { append, close };
 }
 
 export function parsePiJsonLines(stdout: string): PiJsonParseResult {
@@ -893,10 +939,10 @@ async function runProcess(
 
 	const toolCallTelemetry =
 		captureToolCalls === true ? new ToolCallTelemetryCollector() : undefined;
-	const appendLiveEvent = createLiveEventAppender(eventPath);
+	const liveEvents = createLiveEventAppender(eventPath);
 	const parser = new PiJsonStreamParser((event) => {
 		toolCallTelemetry?.processEvent(event);
-		appendLiveEvent(event);
+		liveEvents.append(event);
 	});
 	const stderrStream = createWriteStream(stderrPath, { flags: "w" });
 	let stderrText = "";
@@ -906,6 +952,7 @@ async function runProcess(
 		stderrStream.end();
 		await once(stderrStream, "finish");
 		const parsed = parser.finish();
+		await liveEvents.close();
 		return {
 			outcome,
 			stderrRef: store.refFor("stderr", await fileBytes(stderrPath)),

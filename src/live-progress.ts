@@ -529,6 +529,15 @@ function extractEventText(
 	}
 	if (typeof event.text === "string" && event.text.length > 0)
 		return event.text;
+	const assistantMessageEvent = event.assistantMessageEvent;
+	if (
+		assistantMessageEvent !== null &&
+		typeof assistantMessageEvent === "object"
+	) {
+		const update = assistantMessageEvent as Record<string, unknown>;
+		if (typeof update.delta === "string" && update.delta.length > 0)
+			return update.delta;
+	}
 	return undefined;
 }
 

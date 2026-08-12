@@ -343,7 +343,9 @@ async function readPiTranscript(file: string): Promise<TranscriptItem[]> {
 				(item) => item.type === "assistant" && item.streaming,
 			);
 			if (event.type === "message_end" && existing?.type === "assistant") {
-				existing.message = event.message as unknown as AssistantMessage;
+				const message = event.message as Record<string, unknown>;
+				if (Array.isArray(message.content) && message.content.length > 0)
+					existing.message = message as unknown as AssistantMessage;
 				existing.streaming = false;
 			} else if (event.type === "message_start") {
 				items.push({
@@ -538,6 +540,15 @@ function extractEventText(
 	}
 	if (typeof event.text === "string" && event.text.length > 0)
 		return event.text;
+	const assistantMessageEvent = event.assistantMessageEvent;
+	if (
+		assistantMessageEvent !== null &&
+		typeof assistantMessageEvent === "object"
+	) {
+		const update = assistantMessageEvent as Record<string, unknown>;
+		if (typeof update.delta === "string" && update.delta.length > 0)
+			return update.delta;
+	}
 	return undefined;
 }
 

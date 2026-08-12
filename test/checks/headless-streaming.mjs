@@ -58,8 +58,10 @@ try {
 		fakePi,
 		`#!/usr/bin/env node
 const filler = "x".repeat(4096);
+process.stdout.write(JSON.stringify({ type: "message_start", message: { role: "assistant", content: [] } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "streaming delta" } }) + "\\n");
 for (let index = 0; index < 768; index += 1) {
-  process.stdout.write(JSON.stringify({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: filler + index }] } }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "snapshot", contentIndex: 0, text: filler + index } }) + "\\n");
 }
 process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "fetch_content", args: { url: "https://user:pass@docs.example.test/a/b?token=secret#fragment", headers: { Authorization: "Bearer secret-token", Cookie: "cookie-secret" }, nested: { apiKey: "api-key-secret" }, prompt: "summarize this page" } }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "tool_execution_update", toolCallId: "tool-1", toolName: "fetch_content", args: {}, partialResult: { text: "should-not-appear-update-secret" } }) + "\\n");
@@ -100,6 +102,39 @@ process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "ass
 
 	const outputPath = join(cwd, artifactByType(result, "output").path);
 	assert.equal(await readFile(outputPath, "utf8"), "stream-parser-ok");
+
+	const eventPath = join(
+		cwd,
+		".pi",
+		"agent",
+		"runs",
+		"run_check_headless_streaming",
+		"attempts",
+		"attempt-streaming",
+		"pi-events.jsonl",
+	);
+	const eventsText = await readFile(eventPath, "utf8");
+	const events = eventsText
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+	const eventTypes = new Set(events.map((event) => event.type));
+	assert.equal(eventTypes.has("message_start"), true);
+	assert.equal(eventTypes.has("message_end"), true);
+	assert.equal(eventTypes.has("tool_execution_start"), true);
+	assert.equal(eventTypes.has("tool_execution_update"), true);
+	assert.equal(eventTypes.has("tool_execution_end"), true);
+	assert.equal(
+		events.filter((event) => event.type === "message_update").length,
+		1,
+		"only the small streaming delta should be retained",
+	);
+	assert.ok(eventsText.length < 256 * 1024, "live event transcript should be bounded");
+	assert.equal(eventsText.includes("secret-token"), false);
+	assert.equal(eventsText.includes("cookie-secret"), false);
+	assert.equal(eventsText.includes("api-key-secret"), false);
+	assert.equal(eventsText.includes("token=secret"), false);
 
 	assert.equal(
 		result.artifacts.some((artifact) => artifact.type === "stdout"),

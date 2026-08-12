@@ -243,6 +243,49 @@ async function main() {
 		singleCallText,
 		/subagent run · single · reviewer · Review clipboard image paste behavior · async/,
 	);
+	const lifecycleCallText = renderText(
+		registeredTool.renderCall(
+			{ action: "logs", runId: "run_example", attemptId: "attempt-1" },
+			callTheme,
+			{
+				toolCallId: "lifecycle-call",
+				cwd: process.cwd(),
+				invalidate() {},
+			},
+		),
+		120,
+	);
+	assert.equal(
+		lifecycleCallText,
+		"",
+		"subagent logs should not render a transcript row",
+	);
+	const lifecycleResultText = renderText(
+		registeredTool.renderResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({
+							tool: "subagent",
+							action: "logs",
+							status: "completed",
+						}),
+					},
+				],
+				details: undefined,
+				isError: false,
+			},
+			{ expanded: false, isPartial: false },
+			callTheme,
+		),
+		120,
+	);
+	assert.equal(
+		lifecycleResultText,
+		"",
+		"subagent logs result should not render a transcript row",
+	);
 	const parallelCallText = renderText(
 		registeredTool.renderCall(
 			{

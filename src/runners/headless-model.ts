@@ -1,6 +1,12 @@
 import { once } from "node:events";
 import { execFileSync, spawn } from "node:child_process";
-import { createReadStream, createWriteStream, existsSync, realpathSync } from "node:fs";
+import {
+	appendFileSync,
+	createReadStream,
+	createWriteStream,
+	existsSync,
+	realpathSync,
+} from "node:fs";
 import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -305,15 +311,39 @@ function accumulateAssistantUsage(
 
 const PARSED_EVENT_PATTERN =
 	/"type"\s*:\s*"(?:message_end|turn_end|agent_end|error)"/;
-const TOOL_CALL_EVENT_PATTERN =
-	/"type"\s*:\s*"(?:tool_execution_start|tool_execution_end)"/;
+const STREAM_EVENT_PATTERN =
+	/"type"\s*:\s*"(?:message_start|message_update|tool_execution_start|tool_execution_update|tool_execution_end)"/;
 const MAX_PARSE_ERRORS = 20;
 const MAX_METADATA_ERRORS = 20;
 const MAX_JSON_LINE_CHARS = 64 * 1024 * 1024;
 const STDERR_TEXT_LIMIT = 256 * 1024;
+const LIVE_EVENT_MAX_BYTES = 4 * 1024 * 1024;
+const LIVE_EVENT_MAX_LINE_BYTES = 64 * 1024;
+const LIVE_EVENT_MAX_STRING_CHARS = 4 * 1024;
+const LIVE_EVENT_MAX_DEPTH = 6;
+const LIVE_EVENT_MAX_KEYS = 32;
+const LIVE_EVENT_MAX_ARRAY_ITEMS = 64;
+const LIVE_EVENT_SENSITIVE_KEY_PATTERN =
+	/(?:api[_-]?key|token|secret|password|authorization|cookie|credential|private[_-]?key)/i;
+const LIVE_EVENT_URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
 
 function emptyParseResult(): PiJsonParseResult {
 	return { finalAssistantText: "", errors: [], parseErrors: [], metadata: {} };
+}
+
+function sanitizeLiveEventString(value: string): string {
+	return value.replace(LIVE_EVENT_URL_PATTERN, (raw) => {
+		try {
+			const parsed = new URL(raw.replace(/[),.;!?]+$/g, ""));
+			parsed.username = "";
+			parsed.password = "";
+			parsed.search = "";
+			parsed.hash = "";
+			return `${parsed.protocol}//${parsed.host}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+		} catch {
+			return "[url]";
+		}
+	});
 }
 
 function pushParseError(parsed: PiJsonParseResult, message: string): void {
@@ -330,7 +360,7 @@ function parsePiJsonLine(
 	if (line.trim().length === 0) return;
 	if (
 		!PARSED_EVENT_PATTERN.test(line) &&
-		(onEvent === undefined || !TOOL_CALL_EVENT_PATTERN.test(line))
+		(onEvent === undefined || !STREAM_EVENT_PATTERN.test(line))
 	)
 		return;
 	if (line.length > MAX_JSON_LINE_CHARS) {
@@ -467,6 +497,75 @@ class PiJsonStreamParser {
 		this.buffered = "";
 		parsePiJsonLine(line, this.lineNumber, this.parsed, this.onEvent);
 	}
+}
+
+function sanitizeLiveEventValue(value: unknown, depth = 0): unknown {
+	if (value === null || typeof value === "number" || typeof value === "boolean")
+		return value;
+	if (typeof value === "string") {
+		const sanitized = sanitizeLiveEventString(value);
+		return sanitized.length <= LIVE_EVENT_MAX_STRING_CHARS
+			? sanitized
+			: `${sanitized.slice(0, LIVE_EVENT_MAX_STRING_CHARS - 1)}…`;
+	}
+	if (depth >= LIVE_EVENT_MAX_DEPTH) return "[truncated]";
+	if (Array.isArray(value))
+		return value
+			.slice(0, LIVE_EVENT_MAX_ARRAY_ITEMS)
+			.map((item) => sanitizeLiveEventValue(item, depth + 1));
+	if (typeof value !== "object") return `[${typeof value}]`;
+
+	const record = value as Record<string, unknown>;
+	const sanitized: Record<string, unknown> = {};
+	for (const key of Object.keys(record).slice(0, LIVE_EVENT_MAX_KEYS)) {
+		sanitized[key] = LIVE_EVENT_SENSITIVE_KEY_PATTERN.test(key)
+			? "[REDACTED]"
+			: sanitizeLiveEventValue(record[key], depth + 1);
+	}
+	return sanitized;
+}
+
+function shouldPersistLiveEvent(event: unknown): boolean {
+	if (typeof event !== "object" || event === null) return false;
+	const record = event as Record<string, unknown>;
+	if (record.type !== "message_update") return true;
+	const update = record.assistantMessageEvent;
+	if (typeof update !== "object" || update === null) return false;
+	const updateRecord = update as Record<string, unknown>;
+	return (
+		(updateRecord.type === "text_delta" ||
+			updateRecord.type === "thinking_delta") &&
+		typeof updateRecord.delta === "string" &&
+		updateRecord.delta.length <= LIVE_EVENT_MAX_STRING_CHARS
+	);
+}
+
+function createLiveEventAppender(eventPath: string): (event: unknown) => void {
+	let bytesWritten = 0;
+	let enabled = true;
+
+	return (event: unknown): void => {
+		if (!enabled || !shouldPersistLiveEvent(event)) return;
+		let line: string;
+		try {
+			line = `${JSON.stringify(sanitizeLiveEventValue(event))}\n`;
+		} catch {
+			return;
+		}
+		const lineBytes = Buffer.byteLength(line, "utf8");
+		if (
+			lineBytes > LIVE_EVENT_MAX_LINE_BYTES ||
+			bytesWritten + lineBytes > LIVE_EVENT_MAX_BYTES
+		)
+			return;
+		try {
+			appendFileSync(eventPath, line, "utf8");
+			bytesWritten += lineBytes;
+		} catch {
+			// Live observability must never change the child run outcome.
+			enabled = false;
+		}
+	};
 }
 
 export function parsePiJsonLines(stdout: string): PiJsonParseResult {
@@ -788,13 +887,17 @@ async function runProcess(
 	onProcessStart?: (process: ProcessMetadata) => void | Promise<void>,
 ): Promise<ProcessResult> {
 	const stderrPath = store.pathFor("stderr");
+	const eventPath = join(store.attemptDir, "pi-events.jsonl");
 	await writeFile(stderrPath, "");
+	await writeFile(eventPath, "");
 
 	const toolCallTelemetry =
 		captureToolCalls === true ? new ToolCallTelemetryCollector() : undefined;
-	const parser = new PiJsonStreamParser((event) =>
-		toolCallTelemetry?.processEvent(event),
-	);
+	const appendLiveEvent = createLiveEventAppender(eventPath);
+	const parser = new PiJsonStreamParser((event) => {
+		toolCallTelemetry?.processEvent(event);
+		appendLiveEvent(event);
+	});
 	const stderrStream = createWriteStream(stderrPath, { flags: "w" });
 	let stderrText = "";
 	let stderrContextLengthExceeded = false;

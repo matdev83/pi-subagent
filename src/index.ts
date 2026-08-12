@@ -184,6 +184,16 @@ class SingleLineComponent {
 	}
 }
 
+class HiddenComponent {
+	invalidate(): void {
+		// Intentionally invisible.
+	}
+
+	render(_width: number): string[] {
+		return [];
+	}
+}
+
 /**
  * Tool-panel row for the subagent tool. Shows the static call summary plus a
  * live progress suffix (elapsed time, last activity, last output line) that
@@ -193,7 +203,6 @@ class ProgressLineComponent {
 	constructor(
 		private readonly base: string,
 		private readonly getProgress: () => LiveProgress | undefined,
-		private readonly startedAt = Date.now(),
 	) {}
 
 	invalidate(): void {
@@ -202,10 +211,8 @@ class ProgressLineComponent {
 
 	render(width: number): string[] {
 		const progress = this.getProgress();
-		const suffix =
-			progress === undefined
-				? `${Math.max(0, Math.floor((Date.now() - this.startedAt) / 1_000))}s · starting`
-				: formatProgress(progress);
+		if (progress === undefined) return [clip(this.base, width)];
+		const suffix = formatProgress(progress);
 		const separator = " · ";
 		const baseWidth = Math.max(
 			4,
@@ -408,6 +415,15 @@ function subagentCallSummary(input: unknown): string {
 	}
 
 	return pieces.filter(Boolean).join(" · ");
+}
+
+function isRunAction(input: unknown): boolean {
+	const args = isRecord(input) ? input : {};
+	return args.action === undefined || args.action === "run";
+}
+
+function isLogsAction(input: unknown): boolean {
+	return isRecord(input) && input.action === "logs";
 }
 
 function validationFailure(failure: ResolveValidationFailure): ToolResult {
@@ -924,7 +940,7 @@ export default function registerSubagentEngine(pi: ExtensionAPI) {
 	registerSubagentWatchShortcuts(pi);
 	if (typeof pi.on === "function") {
 		pi.on("tool_execution_start", (event, ctx) => {
-			if (event.toolName !== TOOL_NAME) return;
+			if (event.toolName !== TOOL_NAME || !isRunAction(event.args)) return;
 			const requestedCwd =
 				isRecord(event.args) &&
 				typeof event.args.cwd === "string" &&
@@ -1322,13 +1338,18 @@ function buildSubagentToolDefinition(
 			),
 		}),
 		renderCall(args, theme, context) {
+			if (isLogsAction(args)) return new HiddenComponent();
 			const title = theme.fg("toolTitle", theme.bold("subagent"));
 			const summary = subagentCallSummary(args);
 			const rest = summary.startsWith("subagent ")
 				? summary.slice("subagent ".length)
 				: summary;
 			const base = `${title} ${theme.fg("muted", rest)}`;
-			if (context?.toolCallId && typeof context.invalidate === "function") {
+			if (
+				isRunAction(args) &&
+				context?.toolCallId &&
+				typeof context.invalidate === "function"
+			) {
 				const requestedCwd =
 					isRecord(args) &&
 					typeof args.cwd === "string" &&
@@ -1344,7 +1365,7 @@ function buildSubagentToolDefinition(
 			}
 			return new SingleLineComponent(base);
 		},
-		renderResult(result, options, theme) {
+		renderResult(result, options, theme, context) {
 			const payload = result.details ?? (() => {
 				const text = result.content.find(
 					(item): item is ToolTextContent => item.type === "text",
@@ -1365,6 +1386,11 @@ function buildSubagentToolDefinition(
 					: isRecord(payload)
 						? payload.status
 						: undefined;
+			if (
+				isLogsAction(context?.args) ||
+				(isRecord(payload) && payload.action === "logs")
+			)
+				return new HiddenComponent();
 			const color = options.isPartial
 				? "warning"
 				: settledStatus === "failed" || settledStatus === "cancelled"

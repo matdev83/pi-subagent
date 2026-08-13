@@ -267,13 +267,15 @@ The locator index is only a pointer for finding runs across cwd boundaries. `run
 |---|---|
 | `cwd` | Run from a specific project directory. Existing-run actions accept `cwd` to force a registry location; if omitted, recent runs can be found by global locator and older runs fall back to the current cwd. |
 The `subagent` tool deliberately does not expose a `timeoutMs` parameter. Runs are not time-limited by the tool; subagents are expected to finish on their own, and `action:"wait"` polls internally with a 4-hour default deadline. Orchestrators using the code API can still pass `timeoutMs` explicitly on runs and waits if they need a shorter SLA.
+
+Completed runs include a bounded `output` preview containing the final assistant response. The complete response remains in the run's `output.log` artifact; `outputTruncated: true` means that artifact must be read for the full text. Stderr, reasoning, event streams, and tool payloads are not embedded in the preview. Detached runs expose the preview through completion notification or a later terminal `wait`/`status` result.
 | `visible` | Use a visible worker (`visible: true`): tmux on Linux/macOS, or pair with `backend: "herdr"` on Windows. |
 | `concurrency` | Cap parallel run fan-out. |
 | `failFast` | For synchronous parallel runs, stop scheduling new siblings after the first failed result. |
 | `cancelSiblingsOnFailure` | For synchronous parallel runs, abort already-running siblings after the first failed result; implies fail-fast scheduling. |
 | `model` | Select a Pi model/provider for model-backed workers. |
 | `thinking` / `thinkingLevel` / `reasoningLevel` | Set the reasoning level. |
-| `tools` | Optional tool allowlist. Agent profiles with no `tools` field or an empty field inherit all ambient child tools. Only a non-empty profile list restricts access; call-level tools intersect with it. For agentless runs this sets the full allowlist. |
+| `tools` | Optional tool allowlist. Agent profiles with no `tools` field, an empty list (`tools: []`), or the wildcard (`tools: [*]`) inherit all ambient child tools. Only a non-empty profile list restricts access; call-level tools intersect with it. For agentless runs this sets the full allowlist; use `tools: ["*"]` to leave it unrestricted. |
 | `roleContext` | Add one-off role instructions without creating an agent file. |
 | `agentScope` | Restrict agent lookup to `auto`, `global`, or `project`. |
 | `confirmProjectAgents` | Defaults to `false`. Set `true` to require project-agent confirmation in interactive tool calls; code API calls with `true` reject project-local agents because they cannot prompt. |
@@ -394,7 +396,7 @@ Child sessions load Pi's normal ambient extensions and skills by default, so pac
 
 When `agent` names a Pi agent markdown file, the engine injects that agent's body as system prompt context and inherits supported frontmatter such as `backend`, `model`, `thinking`, and `tools`. Call-level values take precedence over profile defaults. Use `backend: headless` for profiles whose model provider is registered by a Pi extension (for example Cursor ACP), because process-backed children load ambient extensions before model resolution.
 
-Agent files inherit the child session's complete ambient tool surface when `tools` is omitted or empty. Add a non-empty `tools` list only when the profile should be restricted. If both the profile and call provide non-empty `tools` lists, the effective set is their intersection, so either side may narrow access without expanding the profile's declared set.
+Agent files inherit the child session's complete ambient tool surface when `tools` is omitted, empty, or set to the canonical wildcard `[*]`. Add a non-empty list of named tools only when the profile should be restricted. If both the profile and call provide non-empty lists, the effective set is their intersection, so either side may narrow access without expanding the profile's declared set.
 
 For agentless model-backed runs, call-level `tools` can set the full tool allowlist. Use `tools: []` to run an agentless task with no tools.
 

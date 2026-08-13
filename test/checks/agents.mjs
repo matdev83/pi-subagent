@@ -392,6 +392,51 @@ DISABLED_AGENT_PROMPT_MARKER
 	assert.equal(permissiveArgv.includes("--tools"), false);
 	assert.equal(permissiveArgv.includes("--no-tools"), false);
 
+	await writeFile(
+		join(agentsOpenDir, "wildcard.md"),
+		`---
+name: wildcard-agent
+tools: [*]
+---
+WILDCARD_AGENT_PROMPT_MARKER
+`,
+	);
+	const wildcardAgent = await loadAgentByName("wildcard", cwd, "project");
+	assert.ok(wildcardAgent);
+	assert.equal(
+		wildcardAgent.tools,
+		undefined,
+		"tools: [*] should inherit all ambient tools",
+	);
+
+	await writeFile(
+		join(agentsOpenDir, "empty-inline.md"),
+		`---
+name: empty-inline-agent
+tools: []
+---
+EMPTY_INLINE_AGENT_PROMPT_MARKER
+`,
+	);
+	const emptyInlineAgent = await loadAgentByName("empty-inline", cwd, "project");
+	assert.ok(emptyInlineAgent);
+	assert.equal(
+		emptyInlineAgent.tools,
+		undefined,
+		"tools: [] should inherit all ambient tools",
+	);
+
+	assert.equal(
+		resolveEffectiveTools({ tools: ["*"] }, wildcardAgent),
+		undefined,
+		"a wildcard call-level list should leave ambient tools unrestricted",
+	);
+	assert.deepEqual(
+		resolveEffectiveTools({ tools: ["read"] }, wildcardAgent),
+		["read"],
+		"a named call-level list should still narrow a wildcard profile",
+	);
+
 	const globalOnly = await loadAgentByName("review.security", cwd, "global");
 	assert.equal(
 		globalOnly,

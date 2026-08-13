@@ -117,13 +117,14 @@ export function resolveEffectiveTools(
 	input: ResolveInput,
 	agentDefinition: AgentDefinition | undefined,
 ): string[] | undefined {
-	if (agentDefinition === undefined) return input.tools;
+	const requested = input.tools?.includes("*") ? undefined : input.tools;
+	if (agentDefinition === undefined) return requested;
 	// Missing or empty profile tools inherit the child's complete ambient tool
 	// surface. Only a non-empty list opts into restriction.
-	if (agentDefinition.tools === undefined) return input.tools;
-	if (input.tools === undefined) return agentDefinition.tools;
-	const requested = new Set(input.tools);
-	return agentDefinition.tools.filter((tool) => requested.has(tool));
+	if (agentDefinition.tools === undefined) return requested;
+	if (requested === undefined) return agentDefinition.tools;
+	const requestedSet = new Set(requested);
+	return agentDefinition.tools.filter((tool) => requestedSet.has(tool));
 }
 
 function failureKindFromError(error: unknown): FailureKind {

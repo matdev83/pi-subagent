@@ -89,11 +89,24 @@ function backendValue(value: unknown): Backend | undefined {
 
 function toolsValue(value: unknown): string[] | undefined {
 	if (!Array.isArray(value) && typeof value !== "string") return undefined;
-	const raw = Array.isArray(value) ? value : value.split(",");
+	let raw: unknown[];
+	if (Array.isArray(value)) {
+		raw = value;
+	} else {
+		const text = value.trim();
+		if (text.startsWith("[") && text.endsWith("]")) {
+			const inner = text.slice(1, -1).trim();
+			raw = inner.length === 0 ? [] : inner.split(",");
+		} else {
+			raw = text.split(",");
+		}
+	}
 	const tools = uniqueStrings(
 		raw.map((entry) => (typeof entry === "string" ? entry.trim() : undefined)),
 	);
-	return tools.length > 0 ? tools : undefined;
+	// A profile with no tool entries, or with the canonical wildcard, inherits
+	// the complete ambient child-tool surface.
+	return tools.length > 0 && !tools.includes("*") ? tools : undefined;
 }
 
 function toDottedName(path: string): string {

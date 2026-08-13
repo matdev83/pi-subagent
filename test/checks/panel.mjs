@@ -243,6 +243,44 @@ async function main() {
 		singleCallText,
 		/subagent run · single · reviewer · Review clipboard image paste behavior · async/,
 	);
+	const reusedRenderContext = {
+		toolCallId: "tool-call-first",
+		cwd: process.cwd(),
+		invalidate() {},
+	};
+	const firstProgressComponent = registeredTool.renderCall(
+		{ agent: "first", task: "First isolated run" },
+		callTheme,
+		reusedRenderContext,
+	);
+	reusedRenderContext.toolCallId = "tool-call-second";
+	const secondProgressComponent = registeredTool.renderCall(
+		{ agent: "second", task: "Second isolated run" },
+		callTheme,
+		reusedRenderContext,
+	);
+	assert.equal(
+		firstProgressComponent.toolCallId,
+		"tool-call-first",
+		"an existing widget must retain its original tool-call identity when Pi reuses a render context",
+	);
+	assert.equal(
+		secondProgressComponent.toolCallId,
+		"tool-call-second",
+		"a subsequent widget must bind only to its own tool call",
+	);
+	for (const toolCallId of ["tool-call-first", "tool-call-second"]) {
+		registeredTool.renderResult(
+			{
+				content: [{ type: "text", text: '{"status":"completed"}' }],
+				details: undefined,
+				isError: false,
+			},
+			{ expanded: false, isPartial: false },
+			callTheme,
+			{ ...reusedRenderContext, toolCallId },
+		);
+	}
 	const lifecycleCallText = renderText(
 		registeredTool.renderCall(
 			{ action: "logs", runId: "run_example", attemptId: "attempt-1" },
@@ -1123,6 +1161,11 @@ async function main() {
 			newOrderPayload.snapshot?.runId,
 			"run_execute_signature",
 			"execute should read cwd/context from the current Pi tool-call order",
+		);
+		assert.equal(
+			newOrderPayload.snapshot?.output,
+			"execute signature status\n",
+			"terminal lifecycle results should expose the final output preview",
 		);
 		const oldOrderStatus = await registeredTool.execute(
 			"tool-call-old-order",

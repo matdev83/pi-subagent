@@ -69,6 +69,12 @@ import {
 	registerSubagentWatchShortcuts,
 } from "./watch.ts";
 import { WorkspacePolicyError } from "./workspace/worktree.ts";
+import {
+	OUTPUT_PREVIEW_MAX_BYTES,
+	OUTPUT_PREVIEW_TOTAL_MAX_BYTES,
+	readOutputPreview,
+	type OutputPreview,
+} from "./output-preview.ts";
 
 const TOOL_NAME = "subagent";
 const SUPPORTED_KEYS = new Set([
@@ -206,7 +212,7 @@ class HiddenComponent {
 class ProgressLineComponent {
 	constructor(
 		private readonly base: string,
-		private readonly getProgress: () => LiveProgress | undefined,
+		private readonly toolCallId: string,
 	) {}
 
 	invalidate(): void {
@@ -214,7 +220,7 @@ class ProgressLineComponent {
 	}
 
 	render(width: number): string[] {
-		const progress = this.getProgress();
+		const progress = getProgress(this.toolCallId);
 		if (progress === undefined) return [clip(this.base, width)];
 		const suffix = formatProgress(progress);
 		const separator = " · ";
@@ -354,7 +360,16 @@ function artifactSummary(artifacts: readonly ArtifactRef[]) {
 	}));
 }
 
-function compactResult(result: ResultEnvelope, error?: string) {
+async function compactResult(
+	result: ResultEnvelope,
+	error?: string,
+	outputMaxBytes = OUTPUT_PREVIEW_MAX_BYTES,
+) {
+	const outputPreview = await readOutputPreview(
+		result.cwd,
+		result.artifacts,
+		outputMaxBytes,
+	);
 	return {
 		tool: TOOL_NAME,
 		backend: result.backend,
@@ -378,8 +393,33 @@ function compactResult(result: ResultEnvelope, error?: string) {
 			? {}
 			: { completion: result.completion }),
 		metadata: result.metadata,
+		...(outputPreview === undefined ? {} : outputPreview),
 		artifacts: artifactSummary(result.artifacts),
 	};
+}
+
+async function compactResults(results: readonly ResultEnvelope[]) {
+	let remaining = OUTPUT_PREVIEW_TOTAL_MAX_BYTES;
+	const compacted = [];
+	for (const result of results) {
+		const budget = Math.min(OUTPUT_PREVIEW_MAX_BYTES, remaining);
+		const item = await compactResult(result, undefined, budget);
+		if (typeof item.output === "string")
+			remaining = Math.max(0, remaining - Buffer.byteLength(item.output, "utf8"));
+		compacted.push(item);
+	}
+	return compacted;
+}
+
+async function addOutputPreview<T extends { logs?: readonly { type: string; path: string; artifactCwd?: string }[]; }>(
+	snapshot: T | null,
+): Promise<(T & Partial<OutputPreview>) | null> {
+	if (snapshot === null) return null;
+	const preview = await readOutputPreview(
+		snapshot.logs?.find((log) => log.artifactCwd)?.artifactCwd ?? process.cwd(),
+		snapshot.logs ?? [],
+	);
+	return preview === undefined ? snapshot : { ...snapshot, ...preview };
 }
 
 function displayText(value: unknown, maxLength: number): string | undefined {
@@ -596,7 +636,7 @@ async function lifecycleAction(
 	);
 
 	if (action === "status") {
-		const snapshot = await getRunStatus(ref);
+		const snapshot = await addOutputPreview(await getRunStatus(ref));
 		return textResult(
 			{
 				tool: TOOL_NAME,
@@ -711,6 +751,7 @@ async function lifecycleAction(
 			"pollIntervalMs",
 		),
 	});
+	const snapshot = await addOutputPreview(waited.snapshot);
 	const isError =
 		waited.status !== "completed" || waited.snapshot?.status !== "completed";
 	return textResult(
@@ -719,10 +760,10 @@ async function lifecycleAction(
 			action,
 			status: waited.status,
 			outcome: waited.outcome,
-			snapshot: waited.snapshot,
+			snapshot,
 		},
 		isError,
-		{ waited },
+		{ waited: { ...waited, snapshot } },
 	);
 }
 
@@ -899,7 +940,12 @@ async function maybeConfirmProjectAgents(
 	);
 }
 
-function completionPayload(result: ResultEnvelope, mode: ExecutionMode) {
+
+async function completionPayload(result: ResultEnvelope, mode: ExecutionMode) {
+	const outputPreview = await readOutputPreview(
+		result.cwd,
+		result.artifacts,
+	);
 	return {
 		tool: TOOL_NAME,
 		event: "complete",
@@ -909,19 +955,20 @@ function completionPayload(result: ResultEnvelope, mode: ExecutionMode) {
 		backend: result.backend,
 		status: result.status,
 		failureKind: result.failureKind,
+		...(outputPreview === undefined ? {} : outputPreview),
 		artifacts: artifactSummary(result.artifacts),
 	};
 }
 
-function notifyCompletion(
+async function notifyCompletion(
 	input: ResolveInput,
 	result: ResultEnvelope,
 	mode: ExecutionMode,
 	onUpdate?: ToolUpdateCallback,
 	ctx?: NotificationContext,
-): number {
+): Promise<number> {
 	if (input.onComplete !== "notify") return 0;
-	const payload = completionPayload(result, mode);
+	const payload = await completionPayload(result, mode);
 	let updatesSent = 0;
 	try {
 		onUpdate?.({
@@ -1482,22 +1529,25 @@ function buildSubagentToolDefinition(
 				context?.toolCallId &&
 				typeof context.invalidate === "function"
 			) {
+				// Pi may reuse the render-context object while redrawing multiple tool
+				// rows. Capture per-execution values now; retaining `context` would let
+				// an older component follow a later call after the host mutates it.
+				const toolCallId = context.toolCallId;
+				const invalidate = context.invalidate;
 				const requestedCwd =
 					isRecord(args) &&
 					typeof args.cwd === "string" &&
 					args.cwd.length > 0
 						? args.cwd
 						: context.cwd;
-				attachProgress(context.toolCallId, requestedCwd, () =>
-					context.invalidate(),
-				);
-				return new ProgressLineComponent(base, () =>
-					getProgress(context.toolCallId),
-				);
+				attachProgress(toolCallId, requestedCwd, () => invalidate());
+				return new ProgressLineComponent(base, toolCallId);
 			}
 			return new SingleLineComponent(base);
 		},
 		renderResult(result, options, theme, context) {
+			if (!options.isPartial && context?.toolCallId)
+				detachProgress(context.toolCallId);
 			const payload = result.details ?? (() => {
 				const text = result.content.find(
 					(item): item is ToolTextContent => item.type === "text",
@@ -1567,7 +1617,7 @@ function buildSubagentToolDefinition(
 						resolved.backend,
 						validation.input,
 					);
-					return textResult(compactResult(result, unsupportedError), true, {
+					return textResult(await compactResult(result, unsupportedError), true, {
 						result,
 						resolved,
 					});
@@ -1624,7 +1674,7 @@ function buildSubagentToolDefinition(
 						: await runParallelSubagentTasks(validation.input, runCwd, signal, {
 								onRunStarted,
 							});
-					const runs = parallel.results.map((result) => compactResult(result));
+					const runs = await compactResults(parallel.results);
 					const failed =
 						!asyncRequested &&
 						(parallel.failFastTriggered ||
@@ -1667,7 +1717,7 @@ function buildSubagentToolDefinition(
 								ctx as NotificationContext,
 							),
 					});
-					return textResult(compactResult(result), false, { result, resolved });
+					return textResult(await compactResult(result), false, { result, resolved });
 				}
 
 				const result = await runSubagentTask({
@@ -1677,7 +1727,7 @@ function buildSubagentToolDefinition(
 					onRunStarted,
 				});
 				return textResult(
-					compactResult(result),
+					await compactResult(result),
 					result.status !== "completed",
 					{ result, resolved },
 				);
